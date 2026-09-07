@@ -23,21 +23,84 @@
 5. **一键安全卸载与全部释放**
    - 提供独立卸载与【⚠️ 全部卸载】按钮，干净释放 Linux loop 占用与物理驱动器锁，防止数据损坏。
 6. **开箱即用桌面快捷方式**
-   - 已在用户桌面生成 `Ext4-Mounter.lnk`，双击即可直接启动，无控制台黑框打扰。
+   - 随附一键安装脚本，自动在桌面生成 `Ext4-Mounter.lnk`，双击即可直接启动，无控制台黑框打扰。
+
+---
+
+## 📦 环境准备与安装
+
+### 1. 系统与前置环境要求
+
+- **操作系统**：
+  - Windows 10（版本 2004 及以上 / 内部版本 19041+）或 Windows 11。
+- **WSL 2（Windows 适用于 Linux 的子系统）**：
+  - 本工具利用 Windows 官方 WSL 2 及其 Linux 原生内核驱动实现 ext4 分区与镜像文件的安全挂载。
+  - **检查 WSL 状态**：打开 PowerShell 运行 `wsl --status` 或 `wsl -l -v`。
+  - **安装 WSL 2（若尚未安装）**：以管理员身份打开 PowerShell，运行以下命令（会自动启用虚拟化支持、安装 WSL2 内核及默认 Ubuntu 发行版）：
+    ```powershell
+    wsl --install
+    ```
+    *安装完成后，根据系统提示重启电脑即可。*
+  - **确保默认版本为 WSL 2**：
+    ```powershell
+    wsl --set-default-version 2
+    ```
+- **Python 3.8+**：
+  - 前往 [Python 官网](https://www.python.org/downloads/) 下载并安装 Python 3.8 或更高版本。
+  - ⚠️ **重要提示**：安装 Python 向导页面底部务必勾选 **“Add python.exe to PATH”**（将 Python 添加到环境变量）。
+  - ✨ **零第三方 pip 依赖**：本项目完全基于 Python 原生标准库（Tkinter、ctypes、subprocess 等）开发，**无需执行任何 `pip install`**，极其纯净小巧！
+
+---
+
+### 2. 软件安装步骤
+
+#### 步骤一：获取项目源码
+将本项目克隆或下载解压到本地任意目录（例如 `C:\Users\<用户名>\Documents\ssd`）：
+```bash
+git clone https://github.com/su2700/ssd.git
+cd ssd
+```
+*（也可以直接在代码托管页面点击“Download ZIP”并解压）。*
+
+#### 步骤二：一键安装桌面快捷方式（推荐）
+进入项目根目录，找到并**双击运行**：
+👉 **`install_desktop_shortcut.bat`**
+
+- 脚本会自动检测您电脑中的 `pythonw.exe` / `python.exe` 路径与项目入口。
+- 自动在当前用户的 **Windows 桌面** 上生成名为 **`Ext4-Mounter`** 的快捷方式。
+- 提示 `[OK] 安装成功！已在桌面生成 "Ext4-Mounter" 快捷方式！`。
+
+至此安装已全部完成！后续无需再进入文件夹或打开终端，在桌面上双击即可一键打开应用。
+
+#### 步骤三（可选）：打包为单文件独立可执行文件 (.exe)
+如果您希望脱离 Python 解释器在其他 Windows 机器上直接免安装运行：
+1. 双击运行 `scripts\build_exe.bat`。
+2. 脚本会自动使用 PyInstaller 将应用打包为无黑框的单文件可执行程序。
+3. 打包产物将生成在 `dist\Ext4-Mounter.exe`，直接双击该 exe 即可运行。
+
+#### 步骤四（可选）：运行自测验证
+在项目根目录下的命令行中运行单元测试，验证所有磁盘探测与挂载模块正常工作：
+```pwsh
+python -m unittest discover -s tests
+```
+若显示 `Ran 6 tests in ... OK`，说明环境一切就绪。
 
 ---
 
 ## 🚀 启动方式
 
-### 方式 1：双击桌面图标（推荐）
+安装完成后，可通过以下任意方式启动小工具：
+
+### 方式 1：双击桌面图标（推荐，无黑框）
 直接双击 Windows 桌面上的 **`Ext4-Mounter`** 快捷方式。
 
 ### 方式 2：双击启动脚本
 在项目根目录下双击：
-- `start_ext4_mounter.bat`：普通启动（静默无黑框）
-- `start_as_admin.bat`：以管理员身份直接启动
+- **`start_ext4_mounter.bat`**：常规静默启动（推荐日常使用，无控制台黑框）。
+- **`start_as_admin.bat`**：以管理员身份直接启动（物理磁盘挂载无需后续弹窗提权）。
 
 ### 方式 3：命令行启动
+在项目根目录下打开终端运行：
 ```pwsh
 python main.py
 ```
@@ -78,10 +141,12 @@ ssd/
 │   ├── app.py               # 现代化 Tkinter/ttk 桌面 GUI 实现
 │   └── __init__.py
 ├── scripts/
-│   └── create_desktop_shortcut.ps1 # 桌面快捷方式生成器
+│   ├── create_desktop_shortcut.ps1 # 桌面快捷方式生成器
+│   └── build_exe.bat        # 单文件独立 exe 打包脚本
 ├── tests/
 │   ├── test_detector.py     # 磁盘侦测单元测试
 │   └── test_mounter.py      # ext4 镜像挂载与卸载端到端测试
+├── install_desktop_shortcut.bat # 一键安装桌面快捷方式脚本
 ├── main.py                  # 主程序入口
 ├── start_ext4_mounter.bat   # 无黑框启动脚本
 ├── start_as_admin.bat       # 管理员提权启动脚本
@@ -97,3 +162,26 @@ ssd/
 python -m unittest discover -s tests
 ```
 所有 6 项测试（磁盘枚举、分区识别、路径转换、WSL 挂载/卸载）均已自动通过。
+
+---
+
+## ❓ 常见问题与排查 (FAQ)
+
+**Q1：双击桌面图标没有反应，或提示找不到 Python？**
+- 请确认已安装 Python 3.8+ 并添加到了系统环境变量（PATH）。
+- 在 PowerShell 中运行 `python --version`。如果未找到，可重新运行 Python 安装包，选择 **Modify** 并勾选 **"Add python.exe to PATH"**，随后重新运行 `install_desktop_shortcut.bat`。
+
+**Q2：运行或挂载时提示 WSL 相关错误或找不到发行版？**
+- 请以管理员身份打开 PowerShell 执行：
+  ```powershell
+  wsl --install
+  ```
+  安装 WSL 2 和默认 Ubuntu 发行版，并按提示重启电脑。
+
+**Q3：挂载物理 SSD 为什么会弹出 Windows UAC 提示？**
+- 访问底层物理磁盘设备（如 `\\.\PhysicalDrive1`）属于 Windows 操作系统的敏感权限操作。
+- 本工具已内置自动提权模块，挂载时在 UAC 弹窗中点击“是”即可；或者也可以直接右键 `start_as_admin.bat` 选择“以管理员身份运行”。
+
+**Q4：挂载镜像文件 (.img / .vhdx) 是否需要管理员权限？**
+- **不需要**。镜像文件挂载利用了 WSL2 用户态 loopback 设备映射，普通用户权限即可直接挂载并在文件资源管理器中浏览与复制。
+
