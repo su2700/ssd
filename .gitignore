@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+*$py.class
+*.log
+.ext4_mounter_state.json
+tests/*.img
+tests/*.raw
+tests/*.ext4
+.vscode/
+.idea/
