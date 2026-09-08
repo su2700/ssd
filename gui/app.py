@@ -191,6 +191,21 @@ class Ext4MounterApp:
         )
         self.open_selected_btn.pack(fill=tk.X, pady=2)
 
+        self.fix_perm_selected_btn = tk.Button(
+            mounts_action_frame,
+            text="🛡️ 修复权限",
+            font=("Segoe UI", 9),
+            bg="#fef3c7",
+            fg="#b45309",
+            relief=tk.SOLID,
+            bd=1,
+            padx=10,
+            pady=3,
+            cursor="hand2",
+            command=self._fix_selected_mount_permissions
+        )
+        self.fix_perm_selected_btn.pack(fill=tk.X, pady=2)
+
         self.unmount_selected_btn = tk.Button(
             mounts_action_frame,
             text="⏏️ 卸载选中",
@@ -357,6 +372,20 @@ class Ext4MounterApp:
         )
         self.open_phys_btn.pack(side=tk.LEFT, padx=6)
 
+        self.fix_perm_phys_btn = tk.Button(
+            btn_frame,
+            text="🛡️ 修复权限 (全员读写)",
+            font=("Segoe UI", 10),
+            bg="#f59e0b",
+            fg="#ffffff",
+            relief=tk.FLAT,
+            padx=12,
+            pady=8,
+            cursor="hand2",
+            command=lambda: self._fix_permissions_action(self.phys_mount_name_var.get().strip())
+        )
+        self.fix_perm_phys_btn.pack(side=tk.LEFT, padx=6)
+
         self.unmount_phys_btn = tk.Button(
             btn_frame,
             text="⏏️ 卸载此物理磁盘",
@@ -470,6 +499,20 @@ class Ext4MounterApp:
             command=lambda: self._open_mount_by_name(self.img_mount_name_var.get().strip())
         )
         self.open_img_btn.pack(side=tk.LEFT, padx=6)
+
+        self.fix_perm_img_btn = tk.Button(
+            btn_frame,
+            text="🛡️ 修复权限 (全员读写)",
+            font=("Segoe UI", 10),
+            bg="#f59e0b",
+            fg="#ffffff",
+            relief=tk.FLAT,
+            padx=12,
+            pady=8,
+            cursor="hand2",
+            command=lambda: self._fix_permissions_action(self.img_mount_name_var.get().strip())
+        )
+        self.fix_perm_img_btn.pack(side=tk.LEFT, padx=6)
 
         self.unmount_img_btn = tk.Button(
             btn_frame,
@@ -808,6 +851,53 @@ class Ext4MounterApp:
             open_in_explorer(unc_path)
         else:
             messagebox.showinfo("提示", f"挂载点 {mount_name} 当前尚未挂载！请先点击挂载。")
+
+    def _fix_selected_mount_permissions(self):
+        selected = self.mounts_tree.selection()
+        if not selected:
+            messagebox.showinfo("提示", "请先在表格中选择要修复权限的挂载项！")
+            return
+        item_vals = self.mounts_tree.item(selected[0], "values")
+        mount_name = item_vals[0]
+        self._fix_permissions_action(mount_name)
+
+    def _fix_permissions_action(self, mount_name: str):
+        if self.is_busy:
+            return
+        if not mount_name:
+            messagebox.showwarning("提示", "请输入或选择要修复权限的挂载名称！")
+            return
+
+        if not self.mounter.check_mount_exists(mount_name):
+            messagebox.showwarning("提示", f"挂载点 {mount_name} 尚未挂载或不可访问！请先执行挂载。")
+            return
+
+        if not messagebox.askyesno(
+            "确认修复权限",
+            f"即将对挂载点 [{mount_name}] 递归赋予全员读写权限 (chmod -R a+rwX)。\n\n"
+            "此操作将解决 Windows 下因 Linux root/私有权限导致的“拒绝访问”问题。\n\n"
+            "是否立即执行？"
+        ):
+            return
+
+        self.is_busy = True
+        self.log(f"正在对挂载点 [{mount_name}] 执行权限修复 (全员读写 a+rwX)...")
+
+        def worker():
+            ok, msg = self.mounter.fix_permissions(mount_name, mode="rw", restore_ro=False)
+            self.root.after(0, lambda: self._on_fix_permissions_finished(mount_name, ok, msg))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_fix_permissions_finished(self, mount_name: str, ok: bool, msg: str):
+        self.is_busy = False
+        self._refresh_active_mounts_table()
+        if ok:
+            self.log(f"挂载点 [{mount_name}] 权限修复成功: {msg}", level="SUCCESS")
+            messagebox.showinfo("修复成功", f"挂载点 [{mount_name}] 文件权限已修复完成！\n\n现在可以在 Windows 资源管理器中自由读取与写入全部文件。")
+        else:
+            self.log(f"挂载点 [{mount_name}] 权限修复提示: {msg}", level="WARN")
+            messagebox.showwarning("修复提示", msg)
 
     def _unmount_selected_mount(self):
         selected = self.mounts_tree.selection()

@@ -380,3 +380,49 @@ class WslMounter:
                 # Mount is no longer active, prune it
                 unregister_mount(m_name)
         return active
+
+    def fix_permissions(
+        self,
+        mount_name: str,
+        mode: str = "rw",
+        restore_ro: bool = False
+    ) -> Tuple[bool, str]:
+        """
+        Fix file and directory permissions in a mounted ext4 partition or image.
+        - mode: "rw" sets a+rwX (0777 on dirs, 0666 on files), "r" sets a+rX.
+        - restore_ro: if True, switches filesystem back to ro after applying permissions.
+        Returns: (success: bool, message: str)
+        """
+        mount_path = f"/mnt/wsl/{mount_name}"
+        if not self.check_mount_exists(mount_name):
+            return False, f"挂载点不存在或未处于活动状态: {mount_path}"
+
+        chmod_perm = "a+rwX" if mode == "rw" else "a+rX"
+        restore_val = "1" if restore_ro else "0"
+
+        bash_script = (
+            f"mount_path='/mnt/wsl/{mount_name}'; "
+            f"was_ro=0; "
+            f"if mount | grep -E \"on $mount_path \" | grep -q \"ro,\"; then "
+            f"  was_ro=1; "
+            f"  mount -o remount,rw \"$mount_path\" || exit 1; "
+            f"fi; "
+            f"chmod -R {chmod_perm} \"$mount_path\"; "
+            f"if [ \"{restore_val}\" = \"1\" ]; then "
+            f"  mount -o remount,ro \"$mount_path\"; "
+            f"fi"
+        )
+        cmd = ["wsl.exe", "-d", self.distro, "-u", "root", "--", "bash", "-c", bash_script]
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+
+        if proc.returncode == 0 or "Bad message" in proc.stderr:
+            if mode == "rw" and not restore_ro:
+                mounts = load_saved_mounts()
+                for m in mounts:
+                    if m.get("mount_name") == mount_name:
+                        m["read_only"] = False
+                save_mounts(mounts)
+            return True, f"权限修复成功！已赋予全部目录与文件 {chmod_perm} 访问权限。"
+        else:
+            return False, f"权限修复未完全完成 (代码: {proc.returncode}): {proc.stderr.strip() or proc.stdout.strip()}"
+

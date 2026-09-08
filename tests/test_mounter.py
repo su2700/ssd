@@ -65,5 +65,24 @@ class TestWslMounter(unittest.TestCase):
         active_after = self.mounter.list_active_mounts()
         self.assertFalse(any(m["mount_name"] == mount_name for m in active_after))
 
+    def test_image_fix_permissions(self):
+        mount_name = "test_unit_fix_perm"
+
+        # 1. Mount image
+        success, unc_path, msg = self.mounter.mount_image_file(
+            file_path=self.test_img,
+            mount_name=mount_name,
+            read_only=True
+        )
+        self.assertTrue(success, f"Mount failed: {msg}")
+
+        # 2. Fix permissions to full read-write
+        ok, fix_msg = self.mounter.fix_permissions(mount_name, mode="rw", restore_ro=False)
+        self.assertTrue(ok, f"Fix permissions failed: {fix_msg}")
+
+        # 3. Clean up
+        ok_unmount, _ = self.mounter.unmount_image_file(mount_name, self.test_img)
+        self.assertTrue(ok_unmount)
+
 if __name__ == "__main__":
     unittest.main()
