@@ -8,10 +8,16 @@ from typing import Dict, List, Optional, Any
 
 from core.disk_detector import (
     is_admin,
+    is_system_disk,
     get_wsl_distros,
     get_physical_disks,
     get_disk_partitions,
     get_free_drive_letters
+)
+from core.disk_formatter import (
+    format_physical_disk_full,
+    format_physical_partition,
+    sanitize_label
 )
 from core.wsl_mounter import WslMounter, load_saved_mounts
 from core.explorer_helper import (
@@ -400,6 +406,20 @@ class Ext4MounterApp:
         )
         self.unmount_phys_btn.pack(side=tk.LEFT, padx=6)
 
+        self.format_phys_btn = tk.Button(
+            btn_frame,
+            text="🧹 格式化 SSD (ext4)",
+            font=("Segoe UI", 10, "bold"),
+            bg="#dc2626",
+            fg="#ffffff",
+            relief=tk.FLAT,
+            padx=14,
+            pady=8,
+            cursor="hand2",
+            command=self._format_ssd_dialog
+        )
+        self.format_phys_btn.pack(side=tk.LEFT, padx=6)
+
     def _build_image_tab(self, parent: tk.Frame):
         # File selector row
         row1 = tk.Frame(parent, bg=self.card_bg)
@@ -601,9 +621,21 @@ class Ext4MounterApp:
     def _on_partitions_loaded(self, disk: Dict[str, Any], partitions: List[Dict[str, Any]]):
         self.current_partitions = partitions
         if not partitions:
-            self.part_combo["values"] = ["无可用分区或已占用"]
+            self.part_combo["values"] = ["无可用分区 (RAW未初始化或全盘空白)"]
             self.part_combo.current(0)
-            self.part_info_card.configure(text=f"磁盘 {disk['index']} 未检测到独立分区。")
+            if disk.get("is_system"):
+                self.part_info_card.configure(
+                    text=f"🛡️ 磁盘 {disk['index']} 为 Windows 系统主盘，未检测到独立 ext4 分区。",
+                    fg="#0369a1",
+                    bg="#f0f9ff"
+                )
+            else:
+                self.part_info_card.configure(
+                    text=f"💡 [磁盘 {disk['index']}] 状态: {disk.get('partition_style', 'RAW')} (未检测到独立分区)\n"
+                         f"如需在此固态硬盘上使用 ext4，请点击下方的【🧹 格式化 SSD (ext4)】一键全新初始化并格式化！",
+                    fg="#b45309",
+                    bg="#fef3c7"
+                )
             return
 
         values = []
@@ -749,6 +781,287 @@ class Ext4MounterApp:
         else:
             self.log(f"卸载失败: {msg}", level="WARN")
             messagebox.showwarning("卸载提示", msg)
+
+    def _format_ssd_dialog(self):
+        if self.is_busy:
+            messagebox.showwarning("提示", "当前有任务正在执行，请稍候再试！")
+            return
+
+        disk_pos = self.disk_combo.current()
+        if disk_pos < 0 or not self.disks_cache:
+            messagebox.showwarning("提示", "请先选择要格式化的物理磁盘！")
+            return
+
+        disk = self.disks_cache[disk_pos]
+        disk_idx = disk["index"]
+
+        # Security Firewall: Prohibit formatting system/boot disk
+        if disk.get("is_system") or is_system_disk(disk_idx):
+            messagebox.showerror(
+                "系统主盘保护",
+                f"⛔ 安全阻断：\n\n[磁盘 {disk_idx}] ({disk['model']}) 是当前 Windows 系统的启动/系统主盘 (包含 C: 盘)！\n\n"
+                "为了保障您的操作系统与数据安全，本程序严格禁止对系统主盘执行任何格式化操作！"
+            )
+            return
+
+        has_partitions = bool(self.current_partitions)
+        selected_part = None
+        part_pos = self.part_combo.current()
+        if has_partitions and 0 <= part_pos < len(self.current_partitions):
+            selected_part = self.current_partitions[part_pos]
+
+        dialog = tk.Toplevel(self.root)
+        dialog.title(f"格式化 SSD / 分区为 ext4 - [磁盘 {disk_idx}]")
+        dialog.geometry("560x540")
+        dialog.minsize(520, 480)
+        dialog.configure(bg=self.card_bg)
+        dialog.transient(self.root)
+        dialog.grab_set()
+
+        try:
+            x = self.root.winfo_x() + (self.root.winfo_width() // 2) - 280
+            y = self.root.winfo_y() + (self.root.winfo_height() // 2) - 270
+            dialog.geometry(f"+{max(0, x)}+{max(0, y)}")
+        except Exception:
+            pass
+
+        content_frame = tk.Frame(dialog, bg=self.card_bg, padx=20, pady=16)
+        content_frame.pack(fill=tk.BOTH, expand=True)
+
+        # Danger Banner
+        banner = tk.Label(
+            content_frame,
+            text="⚠️ 高危操作警告：格式化将彻底清除目标设备上的全部数据！\n此操作不可撤销，请务必核对目标磁盘编号与型号。",
+            font=("Segoe UI", 9, "bold"),
+            fg="#b91c1c",
+            bg="#fee2e2",
+            padx=12,
+            pady=8,
+            justify=tk.LEFT,
+            anchor=tk.W,
+            relief=tk.SOLID,
+            bd=1
+        )
+        banner.pack(fill=tk.X, pady=(0, 12))
+
+        # Target Disk Info Box
+        info_frame = tk.LabelFrame(
+            content_frame,
+            text="  🎯 目标磁盘信息  ",
+            font=("Segoe UI", 9, "bold"),
+            bg=self.card_bg,
+            fg=self.text_primary,
+            padx=12,
+            pady=8
+        )
+        info_frame.pack(fill=tk.X, pady=(0, 12))
+
+        info_text = (
+            f"• 磁盘编号: 磁盘 {disk_idx} ({disk.get('device_id', '')})\n"
+            f"• 设备型号: {disk['model']}\n"
+            f"• 磁盘总容量: {disk['size_gb']} GB\n"
+            f"• 当前分区状态: {disk.get('partition_style', 'RAW')}"
+        )
+        lbl_info = tk.Label(info_frame, text=info_text, font=("Segoe UI", 9), bg=self.card_bg, justify=tk.LEFT, anchor=tk.W)
+        lbl_info.pack(fill=tk.X)
+
+        # Format Mode Selection
+        mode_frame = tk.LabelFrame(
+            content_frame,
+            text="  ⚙️ 格式化范围选择  ",
+            font=("Segoe UI", 9, "bold"),
+            bg=self.card_bg,
+            fg=self.text_primary,
+            padx=12,
+            pady=8
+        )
+        mode_frame.pack(fill=tk.X, pady=(0, 12))
+
+        mode_var = tk.StringVar(value="full" if not has_partitions else "part")
+
+        rb_full = ttk.Radiobutton(
+            mode_frame,
+            text="整盘全新初始化 (清除旧结构，初始化为 GPT 并创建 100% 容量 ext4 分区)",
+            value="full",
+            variable=mode_var
+        )
+        rb_full.pack(anchor=tk.W, pady=2)
+
+        part_desc = f"仅格式化选中的 分区 #{selected_part['partition_number']} ({selected_part['size_gb']} GB，保留其他分区)" if selected_part else "仅格式化选中分区 (当前磁盘无独立分区，不可用)"
+        rb_part = ttk.Radiobutton(
+            mode_frame,
+            text=part_desc,
+            value="part",
+            variable=mode_var,
+            state=tk.NORMAL if has_partitions else tk.DISABLED
+        )
+        rb_part.pack(anchor=tk.W, pady=2)
+
+        # Volume Label row
+        label_frame = tk.Frame(content_frame, bg=self.card_bg)
+        label_frame.pack(fill=tk.X, pady=(0, 12))
+
+        tk.Label(label_frame, text="ext4 卷标 (Label):", font=("Segoe UI", 9, "bold"), bg=self.card_bg).pack(side=tk.LEFT)
+        label_var = tk.StringVar(value="EXT4_SSD")
+        entry_label = ttk.Entry(label_frame, textvariable=label_var, width=18, font=("Segoe UI", 9))
+        entry_label.pack(side=tk.LEFT, padx=8)
+        tk.Label(label_frame, text="(最多16位字母/数字/下划线)", font=("Segoe UI", 8), fg=self.text_muted, bg=self.card_bg).pack(side=tk.LEFT)
+
+        # Safety Double-Confirmation Area
+        confirm_frame = tk.LabelFrame(
+            content_frame,
+            text="  🛡️ 防误触确认 (满足条件后解锁操作)  ",
+            font=("Segoe UI", 9, "bold"),
+            bg=self.card_bg,
+            fg="#dc2626",
+            padx=12,
+            pady=8
+        )
+        confirm_frame.pack(fill=tk.X, pady=(0, 12))
+
+        ack_var = tk.BooleanVar(value=False)
+        ack_cb = ttk.Checkbutton(
+            confirm_frame,
+            text="我已知晓格式化将永久清除目标数据，且该过程不可撤销",
+            variable=ack_var
+        )
+        ack_cb.pack(anchor=tk.W, pady=(0, 6))
+
+        prompt_row = tk.Frame(confirm_frame, bg=self.card_bg)
+        prompt_row.pack(fill=tk.X)
+
+        tk.Label(
+            prompt_row,
+            text=f"请输入目标磁盘编号 [{disk_idx}] 或 FORMAT 解锁:",
+            font=("Segoe UI", 9),
+            bg=self.card_bg
+        ).pack(side=tk.LEFT)
+
+        input_confirm_var = tk.StringVar()
+        entry_confirm = ttk.Entry(prompt_row, textvariable=input_confirm_var, width=12, font=("Segoe UI", 9, "bold"))
+        entry_confirm.pack(side=tk.LEFT, padx=8)
+
+        dlg_status_lbl = tk.Label(
+            content_frame,
+            text="请完成上方确认以解锁格式化按钮",
+            font=("Segoe UI", 8),
+            fg=self.text_muted,
+            bg=self.card_bg
+        )
+        dlg_status_lbl.pack(fill=tk.X, pady=(0, 8))
+
+        # Bottom Buttons
+        btn_box = tk.Frame(content_frame, bg=self.card_bg)
+        btn_box.pack(fill=tk.X, pady=(6, 0))
+
+        cancel_btn = tk.Button(
+            btn_box,
+            text="取消",
+            font=("Segoe UI", 9),
+            bg="#f1f5f9",
+            fg=self.text_primary,
+            relief=tk.SOLID,
+            bd=1,
+            padx=16,
+            pady=6,
+            cursor="hand2",
+            command=dialog.destroy
+        )
+        cancel_btn.pack(side=tk.RIGHT, padx=(6, 0))
+
+        do_format_btn = tk.Button(
+            btn_box,
+            text="💥 确认并立即开始格式化",
+            font=("Segoe UI", 9, "bold"),
+            bg="#dc2626",
+            fg="#ffffff",
+            relief=tk.FLAT,
+            padx=18,
+            pady=6,
+            state=tk.DISABLED,
+            cursor="hand2"
+        )
+        do_format_btn.pack(side=tk.RIGHT)
+
+        def _check_unlock(*args):
+            is_acked = ack_var.get()
+            txt = input_confirm_var.get().strip().upper()
+            is_match = (txt == str(disk_idx) or txt == "FORMAT")
+            if is_acked and is_match:
+                do_format_btn.configure(state=tk.NORMAL)
+                dlg_status_lbl.configure(text="✅ 已通过安全校验，点击右侧按钮立即开始格式化", fg="#16a34a")
+            else:
+                do_format_btn.configure(state=tk.DISABLED)
+                dlg_status_lbl.configure(text="请完成上方确认以解锁格式化按钮", fg=self.text_muted)
+
+        ack_var.trace_add("write", _check_unlock)
+        input_confirm_var.trace_add("write", _check_unlock)
+
+        def _on_start_format():
+            mode = mode_var.get()
+            raw_label = label_var.get().strip()
+            label = sanitize_label(raw_label)
+
+            dialog.destroy()
+            self._execute_format_task(disk, mode, selected_part, label)
+
+        do_format_btn.configure(command=_on_start_format)
+
+    def _execute_format_task(
+        self,
+        disk: Dict[str, Any],
+        mode: str,
+        selected_part: Optional[Dict[str, Any]],
+        label: str
+    ):
+        self.is_busy = True
+        disk_idx = disk["index"]
+
+        self.format_phys_btn.configure(text="⏳ 正在格式化...", state=tk.DISABLED)
+        self.mount_phys_btn.configure(state=tk.DISABLED)
+
+        if mode == "full":
+            desc = f"[磁盘 {disk_idx}] 整盘全新初始化并格式化为 ext4 (卷标: {label})"
+        else:
+            p_num = selected_part["partition_number"] if selected_part else 1
+            desc = f"[磁盘 {disk_idx}] 分区 #{p_num} 格式化为 ext4 (卷标: {label})"
+
+        self.log(f"开始执行格式化任务: {desc}，请在弹出的 UAC 提权窗口中允许授权...")
+
+        def worker():
+            if mode == "full":
+                ok, msg = format_physical_disk_full(disk_idx, label=label, distro=self.mounter.distro)
+            else:
+                p_num = selected_part["partition_number"] if selected_part else 1
+                ok, msg = format_physical_partition(disk_idx, partition_number=p_num, label=label, distro=self.mounter.distro)
+
+            self.root.after(0, lambda: self._on_format_task_finished(ok, msg, disk_idx))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_format_task_finished(self, ok: bool, msg: str, disk_idx: int):
+        self.is_busy = False
+        self.format_phys_btn.configure(text="🧹 格式化 SSD (ext4)", state=tk.NORMAL)
+        self.mount_phys_btn.configure(state=tk.NORMAL)
+
+        # Refresh disks and partitions to immediately show newly formatted ext4 partition
+        self._async_load_disks()
+
+        if ok:
+            self.log(f"格式化成功: {msg}", level="SUCCESS")
+            messagebox.showinfo(
+                "格式化成功",
+                f"🎉 ext4 格式化成功完成！\n\n"
+                f"{msg}\n\n"
+                f"系统已自动重新枚举磁盘与分区。\n"
+                f"您现在可以直接点击【🚀 一键挂载物理 SSD 分区】挂载并在资源管理器中打开！"
+            )
+        else:
+            self.log(f"格式化未成功: {msg}", level="ERROR")
+            messagebox.showerror(
+                "格式化失败",
+                f"❌ 格式化未能成功完成。\n\n详情:\n{msg}"
+            )
 
     def _mount_image_file_action(self):
         if self.is_busy:

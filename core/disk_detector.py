@@ -74,18 +74,94 @@ def get_wsl_distros() -> Dict[str, Any]:
         result["error"] = str(e)
     return result
 
+def is_system_disk(disk_index: int) -> bool:
+    """
+    Check if the specified disk is a system or boot disk (e.g. contains C:).
+    Such disks MUST never be cleared or formatted.
+    """
+    if disk_index == 0:
+        return True
+    try:
+        ps_cmd = f"Get-Disk -Number {disk_index} | Select-Object IsBoot, IsSystem | ConvertTo-Json -Compress"
+        proc = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-Command", ps_cmd],
+            capture_output=True,
+            text=True,
+            timeout=10
+        )
+        if proc.returncode == 0 and proc.stdout.strip():
+            info = json.loads(proc.stdout)
+            if info.get("IsBoot") or info.get("IsSystem"):
+                return True
+
+        parts = get_disk_partitions(disk_index)
+        for p in parts:
+            if p.get("drive_letter") == "C:":
+                return True
+            if str(p.get("type", "")).lower() in ("system", "boot", "recovery"):
+                return True
+    except Exception:
+        return True
+    return False
+
 def get_physical_disks() -> List[Dict[str, Any]]:
     """
-    Query physical disks using PowerShell Win32_DiskDrive.
+    Query physical disks using PowerShell Get-Disk with Win32_DiskDrive fallback.
+    Returns details including index, model, size, partition_style, is_system.
     """
+    # Prefer Get-Disk for partition style and boot/system flags
     ps_cmd = (
+        "Get-Disk | "
+        "Select-Object Number, FriendlyName, Size, PartitionStyle, IsBoot, IsSystem, BusType | "
+        "ConvertTo-Json -Compress"
+    )
+    try:
+        proc = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-Command", ps_cmd],
+            capture_output=True,
+            text=True,
+            timeout=15
+        )
+        if proc.returncode == 0 and proc.stdout.strip():
+            raw_data = json.loads(proc.stdout)
+            if isinstance(raw_data, dict):
+                raw_data = [raw_data]
+
+            disks = []
+            for item in raw_data:
+                idx = item.get("Number")
+                size_bytes = item.get("Size") or 0
+                size_gb = round(size_bytes / (1024 ** 3), 2)
+                is_boot = bool(item.get("IsBoot"))
+                is_sys = bool(item.get("IsSystem"))
+                is_system = is_boot or is_sys or (idx == 0)
+                part_style = (item.get("PartitionStyle") or "RAW").upper()
+                bus_type = item.get("BusType") or "Fixed"
+
+                disks.append({
+                    "index": idx,
+                    "model": (item.get("FriendlyName") or f"Disk {idx}").strip(),
+                    "size_bytes": size_bytes,
+                    "size_gb": size_gb,
+                    "media_type": bus_type,
+                    "device_id": f"\\\\.\\PHYSICALDRIVE{idx}",
+                    "partition_style": part_style,
+                    "is_system": is_system
+                })
+            disks.sort(key=lambda d: d["index"])
+            return disks
+    except Exception:
+        pass
+
+    # Fallback to Win32_DiskDrive
+    ps_cmd_fallback = (
         "Get-CimInstance Win32_DiskDrive | "
         "Select-Object Index, Model, Size, MediaType, InterfaceType, DeviceID | "
         "ConvertTo-Json -Compress"
     )
     try:
         proc = subprocess.run(
-            ["powershell.exe", "-NoProfile", "-Command", ps_cmd],
+            ["powershell.exe", "-NoProfile", "-Command", ps_cmd_fallback],
             capture_output=True,
             text=True,
             timeout=15
@@ -108,7 +184,9 @@ def get_physical_disks() -> List[Dict[str, Any]]:
                 "size_bytes": size_bytes,
                 "size_gb": size_gb,
                 "media_type": item.get("MediaType") or "Fixed",
-                "device_id": item.get("DeviceID") or f"\\\\.\\PHYSICALDRIVE{idx}"
+                "device_id": item.get("DeviceID") or f"\\\\.\\PHYSICALDRIVE{idx}",
+                "partition_style": "UNKNOWN",
+                "is_system": (idx == 0)
             })
         disks.sort(key=lambda d: d["index"])
         return disks
