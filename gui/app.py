@@ -53,6 +53,7 @@ class Ext4MounterApp:
         self._refresh_system_status()
         self._async_load_disks()
         self._refresh_active_mounts_table()
+        self._start_permission_guard()
 
     def _init_theme_colors(self):
         self.bg_color = "#f4f6f9"
@@ -199,7 +200,7 @@ class Ext4MounterApp:
 
         self.fix_perm_selected_btn = tk.Button(
             mounts_action_frame,
-            text="🛡️ 修复权限",
+            text="🛡️ 赋予 777 权限",
             font=("Segoe UI", 9),
             bg="#fef3c7",
             fg="#b45309",
@@ -321,7 +322,7 @@ class Ext4MounterApp:
 
         # Mount Options
         opt_frame = tk.Frame(parent, bg=self.card_bg)
-        opt_frame.pack(fill=tk.X, pady=6)
+        opt_frame.pack(fill=tk.X, pady=(6, 2))
 
         lbl_name = tk.Label(opt_frame, text="自定义挂载名:", font=("Segoe UI", 9), bg=self.card_bg)
         lbl_name.pack(side=tk.LEFT)
@@ -333,7 +334,7 @@ class Ext4MounterApp:
         self.phys_ro_var = tk.BooleanVar(value=True)
         self.phys_ro_cb = ttk.Checkbutton(
             opt_frame,
-            text="安全只读模式 (推荐，保护 ext4 数据不被意外破坏)",
+            text="安全只读模式 (保护 ext4 数据)",
             variable=self.phys_ro_var
         )
         self.phys_ro_cb.pack(side=tk.LEFT, padx=12)
@@ -345,6 +346,18 @@ class Ext4MounterApp:
             variable=self.phys_auto_open_var
         )
         self.phys_auto_open_cb.pack(side=tk.LEFT)
+
+        # Permission & Advance Options Row
+        opt_frame2 = tk.Frame(parent, bg=self.card_bg)
+        opt_frame2.pack(fill=tk.X, pady=(2, 6))
+
+        self.phys_auto_perm_var = tk.BooleanVar(value=True)
+        self.phys_auto_perm_cb = ttk.Checkbutton(
+            opt_frame2,
+            text="⚡ 始终赋予 777 权限 (chmod 777 + Default ACL 自动继承，读写模式生效)",
+            variable=self.phys_auto_perm_var
+        )
+        self.phys_auto_perm_cb.pack(side=tk.LEFT)
 
         # Buttons row
         btn_frame = tk.Frame(parent, bg=self.card_bg)
@@ -380,7 +393,7 @@ class Ext4MounterApp:
 
         self.fix_perm_phys_btn = tk.Button(
             btn_frame,
-            text="🛡️ 修复权限 (全员读写)",
+            text="🛡️ 赋予 777 权限 (含新文件继承)",
             font=("Segoe UI", 10),
             bg="#f59e0b",
             fg="#ffffff",
@@ -463,7 +476,7 @@ class Ext4MounterApp:
 
         # Options
         opt_frame = tk.Frame(parent, bg=self.card_bg)
-        opt_frame.pack(fill=tk.X, pady=6)
+        opt_frame.pack(fill=tk.X, pady=(6, 2))
 
         lbl_name = tk.Label(opt_frame, text="自定义挂载名:", font=("Segoe UI", 9), bg=self.card_bg)
         lbl_name.pack(side=tk.LEFT)
@@ -487,6 +500,18 @@ class Ext4MounterApp:
             variable=self.img_auto_open_var
         )
         self.img_auto_open_cb.pack(side=tk.LEFT)
+
+        # Permission & Advance Options Row
+        opt_frame2 = tk.Frame(parent, bg=self.card_bg)
+        opt_frame2.pack(fill=tk.X, pady=(2, 6))
+
+        self.img_auto_perm_var = tk.BooleanVar(value=True)
+        self.img_auto_perm_cb = ttk.Checkbutton(
+            opt_frame2,
+            text="⚡ 始终赋予 777 权限 (chmod 777 + Default ACL 自动继承，读写模式生效)",
+            variable=self.img_auto_perm_var
+        )
+        self.img_auto_perm_cb.pack(side=tk.LEFT)
 
         # Buttons row
         btn_frame = tk.Frame(parent, bg=self.card_bg)
@@ -522,7 +547,7 @@ class Ext4MounterApp:
 
         self.fix_perm_img_btn = tk.Button(
             btn_frame,
-            text="🛡️ 修复权限 (全员读写)",
+            text="🛡️ 赋予 777 权限 (含新文件继承)",
             font=("Segoe UI", 10),
             bg="#f59e0b",
             fg="#ffffff",
@@ -722,29 +747,33 @@ class Ext4MounterApp:
         mount_name = self.phys_mount_name_var.get().strip() or f"ssd_d{disk['index']}_p{part['partition_number']}"
         read_only = self.phys_ro_var.get()
         auto_open = self.phys_auto_open_var.get()
+        auto_777 = self.phys_auto_perm_var.get()
 
         self.is_busy = True
         self.mount_phys_btn.configure(text="⏳ 正在挂载中 (请在UAC弹窗允许)...", state=tk.DISABLED)
-        self.log(f"开始挂载物理磁盘 {disk['index']} 分区 {part['partition_number']} -> 挂载名: {mount_name} (只读: {read_only})...")
+        self.log(f"开始挂载物理磁盘 {disk['index']} 分区 {part['partition_number']} -> 挂载名: {mount_name} (只读: {read_only}, 自动777: {auto_777})...")
 
         def worker():
             success, unc_path, msg = self.mounter.mount_physical_disk(
                 disk_index=disk["index"],
                 partition_number=part["partition_number"],
                 mount_name=mount_name,
-                read_only=read_only
+                read_only=read_only,
+                auto_chmod_777=auto_777
             )
-            self.root.after(0, lambda: self._on_physical_mount_finished(success, unc_path, msg, auto_open))
+            self.root.after(0, lambda: self._on_physical_mount_finished(success, unc_path, msg, auto_open, read_only, auto_777))
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _on_physical_mount_finished(self, success: bool, unc_path: str, msg: str, auto_open: bool):
+    def _on_physical_mount_finished(self, success: bool, unc_path: str, msg: str, auto_open: bool, read_only: bool, auto_777: bool):
         self.is_busy = False
         self.mount_phys_btn.configure(text="🚀 一键挂载物理 SSD 分区", state=tk.NORMAL)
         self._refresh_active_mounts_table()
 
         if success:
             self.log(f"挂载成功！UNC 路径: {unc_path}", level="SUCCESS")
+            if not read_only and auto_777:
+                self.log("已自动赋予该分区 777 权限 (chmod 777 + Default ACL 继承)", level="SUCCESS")
             if auto_open and unc_path:
                 open_in_explorer(unc_path)
             messagebox.showinfo("挂载成功", f"物理磁盘分区已成功挂载！\n\n访问路径:\n{unc_path}")
@@ -1074,28 +1103,32 @@ class Ext4MounterApp:
         mount_name = self.img_mount_name_var.get().strip() or "my_ext4_img"
         read_only = self.img_ro_var.get()
         auto_open = self.img_auto_open_var.get()
+        auto_777 = self.img_auto_perm_var.get()
 
         self.is_busy = True
         self.mount_img_btn.configure(text="⏳ 正在挂载镜像中...", state=tk.DISABLED)
-        self.log(f"开始挂载镜像文件: {file_path} -> 挂载名: {mount_name} (只读: {read_only})...")
+        self.log(f"开始挂载镜像文件: {file_path} -> 挂载名: {mount_name} (只读: {read_only}, 自动777: {auto_777})...")
 
         def worker():
             success, unc_path, msg = self.mounter.mount_image_file(
                 file_path=file_path,
                 mount_name=mount_name,
-                read_only=read_only
+                read_only=read_only,
+                auto_chmod_777=auto_777
             )
-            self.root.after(0, lambda: self._on_image_mount_finished(success, unc_path, msg, auto_open))
+            self.root.after(0, lambda: self._on_image_mount_finished(success, unc_path, msg, auto_open, read_only, auto_777))
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _on_image_mount_finished(self, success: bool, unc_path: str, msg: str, auto_open: bool):
+    def _on_image_mount_finished(self, success: bool, unc_path: str, msg: str, auto_open: bool, read_only: bool, auto_777: bool):
         self.is_busy = False
         self.mount_img_btn.configure(text="🚀 一键挂载 ext4 镜像文件", state=tk.NORMAL)
         self._refresh_active_mounts_table()
 
         if success:
             self.log(f"镜像挂载成功: {unc_path}", level="SUCCESS")
+            if not read_only and auto_777:
+                self.log("已自动赋予该镜像 777 权限 (chmod 777 + Default ACL 继承)", level="SUCCESS")
             if auto_open and unc_path:
                 open_in_explorer(unc_path)
             messagebox.showinfo("挂载成功", f"ext4 镜像文件已成功挂载！\n\n访问路径:\n{unc_path}")
@@ -1186,15 +1219,15 @@ class Ext4MounterApp:
             return
 
         if not messagebox.askyesno(
-            "确认修复权限",
-            f"即将对挂载点 [{mount_name}] 递归赋予全员读写权限 (chmod -R a+rwX)。\n\n"
-            "此操作将解决 Windows 下因 Linux root/私有权限导致的“拒绝访问”问题。\n\n"
+            "确认赋予 777 权限",
+            f"即将对挂载点 [{mount_name}] 递归赋予全员 777 完全控制权限 (chmod -R 777) 并配置新建文件 Default ACL 自动继承。\n\n"
+            "此操作将彻底消除 Windows 下由于 Linux root 或只读权限导致的“拒绝访问”问题，且之后新建的文件/目录都将自动继承 777。\n\n"
             "是否立即执行？"
         ):
             return
 
         self.is_busy = True
-        self.log(f"正在对挂载点 [{mount_name}] 执行权限修复 (全员读写 a+rwX)...")
+        self.log(f"正在对挂载点 [{mount_name}] 执行 777 权限配置 (chmod -R 777 + Default ACL)...")
 
         def worker():
             ok, msg = self.mounter.fix_permissions(mount_name, mode="rw", restore_ro=False)
@@ -1206,11 +1239,30 @@ class Ext4MounterApp:
         self.is_busy = False
         self._refresh_active_mounts_table()
         if ok:
-            self.log(f"挂载点 [{mount_name}] 权限修复成功: {msg}", level="SUCCESS")
-            messagebox.showinfo("修复成功", f"挂载点 [{mount_name}] 文件权限已修复完成！\n\n现在可以在 Windows 资源管理器中自由读取与写入全部文件。")
+            self.log(f"挂载点 [{mount_name}] 777 权限配置成功: {msg}", level="SUCCESS")
+            messagebox.showinfo("配置成功", f"挂载点 [{mount_name}] 777 权限配置成功！\n\n全部现有文件/目录已开放 777 读写权限，且新建文件/文件夹将自动继承完全控制权限。")
         else:
-            self.log(f"挂载点 [{mount_name}] 权限修复提示: {msg}", level="WARN")
-            messagebox.showwarning("修复提示", msg)
+            self.log(f"挂载点 [{mount_name}] 权限配置提示: {msg}", level="WARN")
+            messagebox.showwarning("配置提示", msg)
+
+    def _start_permission_guard(self):
+        """Start periodic light background sweep to ensure RW mounts always have 777 permissions."""
+        self._permission_guard_tick()
+
+    def _permission_guard_tick(self):
+        try:
+            active = load_saved_mounts()
+            rw_mounts = [m.get("mount_name") for m in active if not m.get("read_only") and m.get("mount_name")]
+            if rw_mounts and not self.is_busy:
+                def bg_sweep():
+                    for name in rw_mounts:
+                        if self.mounter.check_mount_exists(name):
+                            self.mounter.sweep_permissions(name)
+                threading.Thread(target=bg_sweep, daemon=True).start()
+        except Exception:
+            pass
+        # Sweep every 45 seconds
+        self.root.after(45000, self._permission_guard_tick)
 
     def _unmount_selected_mount(self):
         selected = self.mounts_tree.selection()

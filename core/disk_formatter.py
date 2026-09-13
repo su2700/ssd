@@ -212,7 +212,23 @@ def format_physical_disk_full(
             err = (proc.stderr or proc.stdout).strip()
             return False, f"mkfs.ext4 格式化执行失败 (代码 {proc.returncode}): {err}"
 
-        return True, f"SSD 整盘初始化并格式化为 ext4 成功！(卷标: {clean_label}, 设备: {target_dev})"
+        # 7. Initialize root directory permissions to 777 + POSIX Default ACL
+        init_perm_cmd = (
+            f"mkdir -p /mnt/_ext4_fmt_init && "
+            f"mount {target_dev} /mnt/_ext4_fmt_init && "
+            f"chmod 777 /mnt/_ext4_fmt_init && "
+            f"(setfacl -d -m u::rwx,g::rwx,o::rwx,m::rwx /mnt/_ext4_fmt_init 2>/dev/null || true) && "
+            f"(setfacl -m u::rwx,g::rwx,o::rwx,m::rwx /mnt/_ext4_fmt_init 2>/dev/null || true) && "
+            f"umount /mnt/_ext4_fmt_init && "
+            f"rmdir /mnt/_ext4_fmt_init"
+        )
+        subprocess.run(
+            ["wsl.exe", "-d", distro, "-u", "root", "--", "bash", "-c", init_perm_cmd],
+            capture_output=True,
+            timeout=20
+        )
+
+        return True, f"SSD 整盘初始化并格式化为 ext4 成功！(卷标: {clean_label}, 设备: {target_dev}，已预设 777 权限)"
 
     finally:
         # 7. Always detach bare disk
@@ -271,6 +287,22 @@ def format_physical_partition(
             err = (proc.stderr or proc.stdout).strip()
             return False, f"mkfs.ext4 格式化执行失败 (代码 {proc.returncode}): {err}"
 
+        # Initialize root directory permissions to 777 + POSIX Default ACL
+        init_perm_cmd = (
+            f"mkdir -p /mnt/_ext4_fmt_init && "
+            f"mount {target_dev} /mnt/_ext4_fmt_init && "
+            f"chmod 777 /mnt/_ext4_fmt_init && "
+            f"(setfacl -d -m u::rwx,g::rwx,o::rwx,m::rwx /mnt/_ext4_fmt_init 2>/dev/null || true) && "
+            f"(setfacl -m u::rwx,g::rwx,o::rwx,m::rwx /mnt/_ext4_fmt_init 2>/dev/null || true) && "
+            f"umount /mnt/_ext4_fmt_init && "
+            f"rmdir /mnt/_ext4_fmt_init"
+        )
+        subprocess.run(
+            ["wsl.exe", "-d", distro, "-u", "root", "--", "bash", "-c", init_perm_cmd],
+            capture_output=True,
+            timeout=20
+        )
+
         # Update partition GUID to Linux data in Windows if GPT
         try:
             ps_set = (
@@ -284,7 +316,7 @@ def format_physical_partition(
         except Exception:
             pass
 
-        return True, f"分区 #{partition_number} 成功格式化为 ext4！(卷标: {clean_label})"
+        return True, f"分区 #{partition_number} 成功格式化为 ext4！(卷标: {clean_label}，已预设 777 权限)"
 
     finally:
         # Always unmount bare disk

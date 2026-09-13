@@ -174,7 +174,8 @@ class WslMounter:
         disk_index: int,
         partition_number: int,
         mount_name: str,
-        read_only: bool = True
+        read_only: bool = True,
+        auto_chmod_777: bool = True
     ) -> Tuple[bool, str, str]:
         """
         Mount a physical disk partition into WSL2.
@@ -207,6 +208,9 @@ class WslMounter:
 
         is_mounted = self.check_mount_exists(mount_name) or os.path.exists(unc_path)
         if exit_code == 0 or is_mounted:
+            if not read_only and auto_chmod_777:
+                self.fix_permissions(mount_name, mode="rw", restore_ro=False)
+
             register_mount({
                 "type": "physical",
                 "disk_index": disk_index,
@@ -253,7 +257,8 @@ class WslMounter:
         self,
         file_path: str,
         mount_name: str,
-        read_only: bool = True
+        read_only: bool = True,
+        auto_chmod_777: bool = True
     ) -> Tuple[bool, str, str]:
         """
         Mount an ext4 image file (.img, .ext4, .vhdx, .raw).
@@ -285,9 +290,16 @@ class WslMounter:
             # Raw .img, .ext4, .raw image - mount via WSL2 loop device (NO Windows admin required!)
             wsl_file_path = windows_to_wsl_path(abs_win_path)
             opts = "loop,ro" if read_only else "loop,rw"
+            perm_cmd = ""
+            if not read_only and auto_chmod_777:
+                perm_cmd = (
+                    f" && chmod -R 777 '/mnt/wsl/{mount_name}'"
+                    f" && (setfacl -R -d -m u::rwx,g::rwx,o::rwx,m::rwx '/mnt/wsl/{mount_name}' 2>/dev/null || true)"
+                    f" && (setfacl -R -m u::rwx,g::rwx,o::rwx,m::rwx '/mnt/wsl/{mount_name}' 2>/dev/null || true)"
+                )
             bash_script = (
                 f"mkdir -p '/mnt/wsl/{mount_name}' && "
-                f"mount -o {opts} '{wsl_file_path}' '/mnt/wsl/{mount_name}'"
+                f"mount -o {opts} '{wsl_file_path}' '/mnt/wsl/{mount_name}'{perm_cmd}"
             )
             cmd = ["wsl.exe", "-d", self.distro, "-u", "root", "--", "bash", "-c", bash_script]
             proc = subprocess.run(cmd, capture_output=True, text=True)
@@ -299,6 +311,9 @@ class WslMounter:
             if os.path.exists(unc_path) or self.check_mount_exists(mount_name):
                 break
             time.sleep(0.5)
+
+        if not read_only and auto_chmod_777:
+            self.fix_permissions(mount_name, mode="rw", restore_ro=False)
 
         register_mount({
             "type": "image",
@@ -389,7 +404,9 @@ class WslMounter:
     ) -> Tuple[bool, str]:
         """
         Fix file and directory permissions in a mounted ext4 partition or image.
-        - mode: "rw" sets a+rwX (0777 on dirs, 0666 on files), "r" sets a+rX.
+        - mode: "rw" sets 0777 (rwxrwxrwx) on all files & dirs and sets POSIX Default ACL
+          so that any newly created files and subdirectories automatically inherit 777.
+        - mode: "r" sets a+rX.
         - restore_ro: if True, switches filesystem back to ro after applying permissions.
         Returns: (success: bool, message: str)
         """
@@ -397,21 +414,37 @@ class WslMounter:
         if not self.check_mount_exists(mount_name):
             return False, f"挂载点不存在或未处于活动状态: {mount_path}"
 
-        chmod_perm = "a+rwX" if mode == "rw" else "a+rX"
         restore_val = "1" if restore_ro else "0"
 
-        bash_script = (
-            f"mount_path='/mnt/wsl/{mount_name}'; "
-            f"was_ro=0; "
-            f"if mount | grep -E \"on $mount_path \" | grep -q \"ro,\"; then "
-            f"  was_ro=1; "
-            f"  mount -o remount,rw \"$mount_path\" || exit 1; "
-            f"fi; "
-            f"chmod -R {chmod_perm} \"$mount_path\"; "
-            f"if [ \"{restore_val}\" = \"1\" ]; then "
-            f"  mount -o remount,ro \"$mount_path\"; "
-            f"fi"
-        )
+        if mode == "rw":
+            bash_script = (
+                f"mount_path='/mnt/wsl/{mount_name}'; "
+                f"was_ro=0; "
+                f"if mount | grep -E \"on $mount_path \" | grep -q \"ro,\"; then "
+                f"  was_ro=1; "
+                f"  mount -o remount,rw \"$mount_path\" || exit 1; "
+                f"fi; "
+                f"chmod -R 777 \"$mount_path\" 2>/dev/null || true; "
+                f"setfacl -R -d -m u::rwx,g::rwx,o::rwx,m::rwx \"$mount_path\" 2>/dev/null || true; "
+                f"setfacl -R -m u::rwx,g::rwx,o::rwx,m::rwx \"$mount_path\" 2>/dev/null || true; "
+                f"if [ \"{restore_val}\" = \"1\" ]; then "
+                f"  mount -o remount,ro \"$mount_path\"; "
+                f"fi"
+            )
+        else:
+            bash_script = (
+                f"mount_path='/mnt/wsl/{mount_name}'; "
+                f"was_ro=0; "
+                f"if mount | grep -E \"on $mount_path \" | grep -q \"ro,\"; then "
+                f"  was_ro=1; "
+                f"  mount -o remount,rw \"$mount_path\" || exit 1; "
+                f"fi; "
+                f"chmod -R a+rX \"$mount_path\" 2>/dev/null || true; "
+                f"if [ \"{restore_val}\" = \"1\" ]; then "
+                f"  mount -o remount,ro \"$mount_path\"; "
+                f"fi"
+            )
+
         cmd = ["wsl.exe", "-d", self.distro, "-u", "root", "--", "bash", "-c", bash_script]
         proc = subprocess.run(cmd, capture_output=True, text=True)
 
@@ -422,7 +455,26 @@ class WslMounter:
                     if m.get("mount_name") == mount_name:
                         m["read_only"] = False
                 save_mounts(mounts)
-            return True, f"权限修复成功！已赋予全部目录与文件 {chmod_perm} 访问权限。"
+            return True, "777 权限配置成功！已赋予全部目录与文件 777 完全控制权限，并已启用 Default ACL 自动继承。"
         else:
             return False, f"权限修复未完全完成 (代码: {proc.returncode}): {proc.stderr.strip() or proc.stdout.strip()}"
+
+    def sweep_permissions(self, mount_name: str) -> bool:
+        """
+        Fast non-blocking sweep to ensure any new or altered files/dirs have 777 permissions.
+        Uses `find ! -perm 777 -exec chmod 777 {} +`.
+        """
+        mount_path = f"/mnt/wsl/{mount_name}"
+        if not self.check_mount_exists(mount_name):
+            return False
+        bash_script = (
+            f"mount_path='/mnt/wsl/{mount_name}'; "
+            f"find \"$mount_path\" ! -perm 777 -exec chmod 777 {{}} + 2>/dev/null || true"
+        )
+        cmd = ["wsl.exe", "-d", self.distro, "-u", "root", "--", "bash", "-c", bash_script]
+        try:
+            res = subprocess.run(cmd, capture_output=True, timeout=10)
+            return res.returncode == 0
+        except Exception:
+            return False
 
