@@ -198,6 +198,21 @@ class Ext4MounterApp:
         )
         self.open_selected_btn.pack(fill=tk.X, pady=2)
 
+        self.fix_rosbag_btn = tk.Button(
+            mounts_action_frame,
+            text="🛠️ 修复 mcap 权限",
+            font=("Segoe UI", 9, "bold"),
+            bg="#fef9c3",
+            fg="#854d0e",
+            relief=tk.SOLID,
+            bd=1,
+            padx=10,
+            pady=3,
+            cursor="hand2",
+            command=self._fix_selected_rosbag_permissions
+        )
+        self.fix_rosbag_btn.pack(fill=tk.X, pady=2)
+
         self.fix_perm_selected_btn = tk.Button(
             mounts_action_frame,
             text="🛡️ 赋予 777 权限",
@@ -354,7 +369,7 @@ class Ext4MounterApp:
         self.phys_auto_perm_var = tk.BooleanVar(value=True)
         self.phys_auto_perm_cb = ttk.Checkbutton(
             opt_frame2,
-            text="⚡ 始终赋予 777 权限 (chmod 777 + Default ACL 自动继承，读写模式生效)",
+            text="⚡ 自动配置 777/可见权限 (解决 ROS2/mcap 0字节与权限问题，Default ACL 继承)",
             variable=self.phys_auto_perm_var
         )
         self.phys_auto_perm_cb.pack(side=tk.LEFT)
@@ -391,9 +406,24 @@ class Ext4MounterApp:
         )
         self.open_phys_btn.pack(side=tk.LEFT, padx=6)
 
+        self.fix_ros_phys_btn = tk.Button(
+            btn_frame,
+            text="🛠️ 修复 mcap 权限",
+            font=("Segoe UI", 10, "bold"),
+            bg="#fef9c3",
+            fg="#854d0e",
+            relief=tk.SOLID,
+            bd=1,
+            padx=12,
+            pady=8,
+            cursor="hand2",
+            command=lambda: self._fix_rosbag_permissions_action(self.phys_mount_name_var.get().strip())
+        )
+        self.fix_ros_phys_btn.pack(side=tk.LEFT, padx=6)
+
         self.fix_perm_phys_btn = tk.Button(
             btn_frame,
-            text="🛡️ 赋予 777 权限 (含新文件继承)",
+            text="🛡️ 赋予 777 权限",
             font=("Segoe UI", 10),
             bg="#f59e0b",
             fg="#ffffff",
@@ -508,7 +538,7 @@ class Ext4MounterApp:
         self.img_auto_perm_var = tk.BooleanVar(value=True)
         self.img_auto_perm_cb = ttk.Checkbutton(
             opt_frame2,
-            text="⚡ 始终赋予 777 权限 (chmod 777 + Default ACL 自动继承，读写模式生效)",
+            text="⚡ 自动配置 777/可见权限 (解决 ROS2/mcap 0字节与权限问题，Default ACL 继承)",
             variable=self.img_auto_perm_var
         )
         self.img_auto_perm_cb.pack(side=tk.LEFT)
@@ -545,9 +575,24 @@ class Ext4MounterApp:
         )
         self.open_img_btn.pack(side=tk.LEFT, padx=6)
 
+        self.fix_ros_img_btn = tk.Button(
+            btn_frame,
+            text="🛠️ 修复 mcap 权限",
+            font=("Segoe UI", 10, "bold"),
+            bg="#fef9c3",
+            fg="#854d0e",
+            relief=tk.SOLID,
+            bd=1,
+            padx=12,
+            pady=8,
+            cursor="hand2",
+            command=lambda: self._fix_rosbag_permissions_action(self.img_mount_name_var.get().strip())
+        )
+        self.fix_ros_img_btn.pack(side=tk.LEFT, padx=6)
+
         self.fix_perm_img_btn = tk.Button(
             btn_frame,
-            text="🛡️ 赋予 777 权限 (含新文件继承)",
+            text="🛡️ 赋予 777 权限",
             font=("Segoe UI", 10),
             bg="#f59e0b",
             fg="#ffffff",
@@ -1244,6 +1289,70 @@ class Ext4MounterApp:
         else:
             self.log(f"挂载点 [{mount_name}] 权限配置提示: {msg}", level="WARN")
             messagebox.showwarning("配置提示", msg)
+
+    def _fix_selected_rosbag_permissions(self):
+        selected = self.mounts_tree.selection()
+        if not selected:
+            messagebox.showinfo("提示", "请先在表格中选择要修复 mcap 权限的挂载项！")
+            return
+        item_vals = self.mounts_tree.item(selected[0], "values")
+        mount_name = item_vals[0]
+        self._fix_rosbag_permissions_action(mount_name)
+
+    def _fix_rosbag_permissions_action(self, mount_name: str, target_dir: Optional[str] = None):
+        if self.is_busy:
+            return
+        if not mount_name:
+            messagebox.showwarning("提示", "请输入或在表格中选择要修复权限的挂载名称！")
+            return
+
+        if not self.mounter.check_mount_exists(mount_name):
+            messagebox.showwarning("提示", f"挂载点 [{mount_name}] 尚未挂载或不可访问！请先执行挂载。")
+            return
+
+        detected = self.mounter.detect_rosbag_dirs(mount_name)
+        folder_tip = ""
+        if detected:
+            folder_tip = f"\n\n已检测到相关目录：\n  " + "\n  ".join([f"📁 {d}" for d in detected[:5]])
+            if not target_dir and len(detected) == 1:
+                target_dir = detected[0]
+
+        target_desc = f"子目录 [{target_dir}]" if target_dir else f"挂载点 [{mount_name}] 全部目录"
+
+        if not messagebox.askyesno(
+            "确认修复 ROS2 / mcap 权限",
+            f"即将对 {target_desc} 执行 ROS2 / mcap 专项权限修复：\n\n"
+            "• 彻底解决 Windows 资源管理器显示「大小: 0 字节 / 0 个文件」问题（常见于 Docker/ROS2 写入的数据）\n"
+            "• 递归为全部 mcap/bag 录制目录与文件开放读取与遍历权限 (chmod a+rX + POSIX Default ACL 继承)\n"
+            "• 若当前为只读挂载，修复完成后将自动恢复只读保护，确保数据安全\n"
+            f"{folder_tip}\n\n"
+            "是否立即开始修复？"
+        ):
+            return
+
+        self.is_busy = True
+        self.log(f"正在对挂载点 [{mount_name}] 执行 ROS2/mcap 权限修复...")
+
+        def worker():
+            ok, msg = self.mounter.fix_rosbag_permissions(mount_name, target_dir=target_dir)
+            self.root.after(0, lambda: self._on_fix_rosbag_permissions_finished(mount_name, ok, msg))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_fix_rosbag_permissions_finished(self, mount_name: str, ok: bool, msg: str):
+        self.is_busy = False
+        self._refresh_active_mounts_table()
+        if ok:
+            self.log(f"挂载点 [{mount_name}] mcap 权限修复成功: {msg}", level="SUCCESS")
+            messagebox.showinfo(
+                "修复成功",
+                f"挂载点 [{mount_name}] ROS2/mcap 权限修复完成！\n\n"
+                f"{msg}\n\n"
+                "💡 提示：您现在可以在 Windows 资源管理器中刷新查看，文件夹属性、大小与全部 .mcap 文件即可正常显示与读取。"
+            )
+        else:
+            self.log(f"挂载点 [{mount_name}] mcap 权限修复未完成: {msg}", level="WARN")
+            messagebox.showwarning("修复提示", msg)
 
     def _start_permission_guard(self):
         """Start periodic light background sweep to ensure RW mounts always have 777 permissions."""

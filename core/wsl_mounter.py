@@ -188,7 +188,7 @@ class WslMounter:
             f"--name \"{mount_name}\" "
             f"--type ext4"
         )
-        if read_only:
+        if read_only and not auto_chmod_777:
             mount_cmd += " --options ro"
 
         if is_admin():
@@ -208,8 +208,8 @@ class WslMounter:
 
         is_mounted = self.check_mount_exists(mount_name) or os.path.exists(unc_path)
         if exit_code == 0 or is_mounted:
-            if not read_only and auto_chmod_777:
-                self.fix_permissions(mount_name, mode="rw", restore_ro=False)
+            if auto_chmod_777:
+                self.fix_permissions(mount_name, mode="rw", restore_ro=read_only)
 
             register_mount({
                 "type": "physical",
@@ -289,18 +289,22 @@ class WslMounter:
         else:
             # Raw .img, .ext4, .raw image - mount via WSL2 loop device (NO Windows admin required!)
             wsl_file_path = windows_to_wsl_path(abs_win_path)
-            opts = "loop,ro" if read_only else "loop,rw"
-            perm_cmd = ""
-            if not read_only and auto_chmod_777:
-                perm_cmd = (
-                    f" && chmod -R 777 '/mnt/wsl/{mount_name}'"
-                    f" && (setfacl -R -d -m u::rwx,g::rwx,o::rwx,m::rwx '/mnt/wsl/{mount_name}' 2>/dev/null || true)"
-                    f" && (setfacl -R -m u::rwx,g::rwx,o::rwx,m::rwx '/mnt/wsl/{mount_name}' 2>/dev/null || true)"
+            if read_only and not auto_chmod_777:
+                bash_script = (
+                    f"mkdir -p '/mnt/wsl/{mount_name}' && "
+                    f"mount -o loop,ro '{wsl_file_path}' '/mnt/wsl/{mount_name}'"
                 )
-            bash_script = (
-                f"mkdir -p '/mnt/wsl/{mount_name}' && "
-                f"mount -o {opts} '{wsl_file_path}' '/mnt/wsl/{mount_name}'{perm_cmd}"
-            )
+            elif read_only and auto_chmod_777:
+                bash_script = (
+                    f"mkdir -p '/mnt/wsl/{mount_name}' && "
+                    f"(mount -o loop,rw '{wsl_file_path}' '/mnt/wsl/{mount_name}' 2>/dev/null || "
+                    f" mount -o loop,ro '{wsl_file_path}' '/mnt/wsl/{mount_name}')"
+                )
+            else:
+                bash_script = (
+                    f"mkdir -p '/mnt/wsl/{mount_name}' && "
+                    f"mount -o loop,rw '{wsl_file_path}' '/mnt/wsl/{mount_name}'"
+                )
             cmd = ["wsl.exe", "-d", self.distro, "-u", "root", "--", "bash", "-c", bash_script]
             proc = subprocess.run(cmd, capture_output=True, text=True)
             if proc.returncode != 0:
@@ -312,8 +316,8 @@ class WslMounter:
                 break
             time.sleep(0.5)
 
-        if not read_only and auto_chmod_777:
-            self.fix_permissions(mount_name, mode="rw", restore_ro=False)
+        if auto_chmod_777:
+            self.fix_permissions(mount_name, mode="rw", restore_ro=read_only)
 
         register_mount({
             "type": "image",
@@ -400,7 +404,8 @@ class WslMounter:
         self,
         mount_name: str,
         mode: str = "rw",
-        restore_ro: bool = False
+        restore_ro: bool = False,
+        subpath: Optional[str] = None
     ) -> Tuple[bool, str]:
         """
         Fix file and directory permissions in a mounted ext4 partition or image.
@@ -408,40 +413,42 @@ class WslMounter:
           so that any newly created files and subdirectories automatically inherit 777.
         - mode: "r" sets a+rX.
         - restore_ro: if True, switches filesystem back to ro after applying permissions.
+        - subpath: optional subfolder relative to mountpoint to limit scope (e.g. 'mcap').
         Returns: (success: bool, message: str)
         """
         mount_path = f"/mnt/wsl/{mount_name}"
         if not self.check_mount_exists(mount_name):
             return False, f"挂载点不存在或未处于活动状态: {mount_path}"
 
+        target_path = f"{mount_path}/{subpath.strip('/')}" if subpath else mount_path
         restore_val = "1" if restore_ro else "0"
 
         if mode == "rw":
             bash_script = (
-                f"mount_path='/mnt/wsl/{mount_name}'; "
                 f"was_ro=0; "
-                f"if mount | grep -E \"on $mount_path \" | grep -q \"ro,\"; then "
+                f"if mount | grep -E 'on {mount_path} ' | grep -q 'ro,'; then "
                 f"  was_ro=1; "
-                f"  mount -o remount,rw \"$mount_path\" || exit 1; "
+                f"  mount -o remount,rw '{mount_path}' || {{ echo 'REMOUNT_FAILED'; exit 10; }}; "
                 f"fi; "
-                f"chmod -R 777 \"$mount_path\" 2>/dev/null || true; "
-                f"setfacl -R -d -m u::rwx,g::rwx,o::rwx,m::rwx \"$mount_path\" 2>/dev/null || true; "
-                f"setfacl -R -m u::rwx,g::rwx,o::rwx,m::rwx \"$mount_path\" 2>/dev/null || true; "
+                f"chmod -R 777 '{target_path}' 2>/dev/null || true; "
+                f"setfacl -R -d -m u::rwx,g::rwx,o::rwx,m::rwx '{target_path}' 2>/dev/null || true; "
+                f"setfacl -R -m u::rwx,g::rwx,o::rwx,m::rwx '{target_path}' 2>/dev/null || true; "
                 f"if [ \"{restore_val}\" = \"1\" ]; then "
-                f"  mount -o remount,ro \"$mount_path\"; "
+                f"  mount -o remount,ro '{mount_path}' 2>/dev/null || true; "
                 f"fi"
             )
         else:
             bash_script = (
-                f"mount_path='/mnt/wsl/{mount_name}'; "
                 f"was_ro=0; "
-                f"if mount | grep -E \"on $mount_path \" | grep -q \"ro,\"; then "
+                f"if mount | grep -E 'on {mount_path} ' | grep -q 'ro,'; then "
                 f"  was_ro=1; "
-                f"  mount -o remount,rw \"$mount_path\" || exit 1; "
+                f"  mount -o remount,rw '{mount_path}' || {{ echo 'REMOUNT_FAILED'; exit 10; }}; "
                 f"fi; "
-                f"chmod -R a+rX \"$mount_path\" 2>/dev/null || true; "
+                f"chmod -R a+rX '{target_path}' 2>/dev/null || true; "
+                f"setfacl -R -d -m u::rwx,g::rwx,o::rx '{target_path}' 2>/dev/null || true; "
+                f"setfacl -R -m u::rwx,g::rwx,o::rx '{target_path}' 2>/dev/null || true; "
                 f"if [ \"{restore_val}\" = \"1\" ]; then "
-                f"  mount -o remount,ro \"$mount_path\"; "
+                f"  mount -o remount,ro '{mount_path}' 2>/dev/null || true; "
                 f"fi"
             )
 
@@ -455,9 +462,83 @@ class WslMounter:
                     if m.get("mount_name") == mount_name:
                         m["read_only"] = False
                 save_mounts(mounts)
-            return True, "777 权限配置成功！已赋予全部目录与文件 777 完全控制权限，并已启用 Default ACL 自动继承。"
+            target_desc = f"子目录 [{subpath}]" if subpath else "全部目录与文件"
+            return True, f"权限配置成功！已赋予 {target_desc} 完全访问权限，并已配置 Default ACL 自动继承。"
+        elif proc.returncode == 10 or "REMOUNT_FAILED" in proc.stdout:
+            return False, "该挂载点在底层被只读硬件/WSL锁定 (WSL --options ro)，无法执行权限写入。请先卸载后，取消勾选只读或勾选自动权限修复重新挂载。"
         else:
             return False, f"权限修复未完全完成 (代码: {proc.returncode}): {proc.stderr.strip() or proc.stdout.strip()}"
+
+    def detect_rosbag_dirs(self, mount_name: str) -> List[str]:
+        """
+        Detect potential rosbag/mcap folders within the mount point.
+        Returns relative folder names (e.g. ['mcap', 'rosbag2_2026_09_10']).
+        """
+        mount_path = f"/mnt/wsl/{mount_name}"
+        if not self.check_mount_exists(mount_name):
+            return []
+        cmd = [
+            "wsl.exe", "-d", self.distro, "-u", "root", "--", "bash", "-c",
+            f"find '{mount_path}' -maxdepth 2 -type d \\( -iname '*mcap*' -o -iname '*bag*' \\) 2>/dev/null | head -n 10"
+        ]
+        try:
+            res = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+            if res.returncode == 0 and res.stdout.strip():
+                lines = [l.strip() for l in res.stdout.strip().splitlines() if l.strip()]
+                rel_paths = []
+                for p in lines:
+                    if p.startswith(mount_path):
+                        rel = p[len(mount_path):].lstrip("/\\")
+                        if rel:
+                            rel_paths.append(rel)
+                return rel_paths
+        except Exception:
+            pass
+        return []
+
+    def fix_rosbag_permissions(
+        self,
+        mount_name: str,
+        target_dir: Optional[str] = None
+    ) -> Tuple[bool, str]:
+        """
+        Specialized repair for ROS2/Docker bag folders (permissions 0700 nobody:nogroup / root).
+        Recursively applies a+rX / a+rwX and POSIX Default ACL so Windows Explorer can immediately open,
+        read, and inspect all .mcap and bag files without permission errors or 0-byte display issues.
+        """
+        mount_path = f"/mnt/wsl/{mount_name}"
+        if not self.check_mount_exists(mount_name):
+            return False, f"挂载点不存在或未处于活动状态: {mount_path}"
+
+        target = f"{mount_path}/{target_dir.strip('/')}" if target_dir else mount_path
+
+        bash_script = (
+            f"was_ro=0; "
+            f"if mount | grep -E 'on {mount_path} ' | grep -q 'ro,'; then "
+            f"  was_ro=1; "
+            f"  mount -o remount,rw '{mount_path}' || {{ echo 'REMOUNT_RO_LOCKED'; exit 10; }}; "
+            f"fi; "
+            f"if [ \"$was_ro\" = \"1\" ]; then "
+            f"  chmod -R a+rX '{target}' 2>/dev/null || true; "
+            f"  setfacl -R -d -m u::rwx,g::rwx,o::rx '{target}' 2>/dev/null || true; "
+            f"  setfacl -R -m u::rwx,g::rwx,o::rx '{target}' 2>/dev/null || true; "
+            f"  mount -o remount,ro '{mount_path}' 2>/dev/null || true; "
+            f"else "
+            f"  chmod -R a+rwX '{target}' 2>/dev/null || true; "
+            f"  setfacl -R -d -m u::rwx,g::rwx,o::rwx,m::rwx '{target}' 2>/dev/null || true; "
+            f"  setfacl -R -m u::rwx,g::rwx,o::rwx,m::rwx '{target}' 2>/dev/null || true; "
+            f"fi"
+        )
+        cmd = ["wsl.exe", "-d", self.distro, "-u", "root", "--", "bash", "-c", bash_script]
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+
+        if proc.returncode == 0:
+            scope = f"目录 [{target_dir}]" if target_dir else "全盘/mcap 目录"
+            return True, f"ROS2/mcap 权限修复成功！已为 {scope} 开放读取与遍历权限，Windows 资源管理器可正常读取全部内容与文件大小。"
+        elif proc.returncode == 10 or "REMOUNT_RO_LOCKED" in proc.stdout:
+            return False, "当前挂载在底层已被 WSL 只读锁定 (WSL --options ro)，无法直接修改权限。请先点击【⏏️ 卸载】，并勾选【⚡ 自动配置 777/可见权限】后重新挂载。"
+        else:
+            return False, f"权限修复执行异常 (代码: {proc.returncode}): {proc.stderr.strip() or proc.stdout.strip()}"
 
     def sweep_permissions(self, mount_name: str) -> bool:
         """
@@ -467,10 +548,7 @@ class WslMounter:
         mount_path = f"/mnt/wsl/{mount_name}"
         if not self.check_mount_exists(mount_name):
             return False
-        bash_script = (
-            f"mount_path='/mnt/wsl/{mount_name}'; "
-            f"find \"$mount_path\" ! -perm 777 -exec chmod 777 {{}} + 2>/dev/null || true"
-        )
+        bash_script = f"find '{mount_path}' ! -perm 777 -exec chmod 777 {{}} + 2>/dev/null || true"
         cmd = ["wsl.exe", "-d", self.distro, "-u", "root", "--", "bash", "-c", bash_script]
         try:
             res = subprocess.run(cmd, capture_output=True, timeout=10)

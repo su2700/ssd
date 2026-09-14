@@ -137,5 +137,53 @@ class TestWslMounter(unittest.TestCase):
             # Clean up
             self.mounter.unmount_image_file(mount_name, self.test_img)
 
+    def test_fix_rosbag_permissions(self):
+        mount_name = "test_unit_rosbag_fix"
+
+        # Mount image in read-only mode with auto_chmod_777=True (the app default)
+        success, unc_path, msg = self.mounter.mount_image_file(
+            file_path=self.test_img,
+            mount_name=mount_name,
+            read_only=True,
+            auto_chmod_777=True
+        )
+        self.assertTrue(success, f"Mount failed: {msg}")
+
+        try:
+            # 1. Remount RW temporarily in WSL to inject 0700/0600 rosbag/mcap directory structure
+            setup_script = (
+                f"mount -o remount,rw /mnt/wsl/{mount_name} && "
+                f"mkdir -p /mnt/wsl/{mount_name}/mcap/rosbag2_test && "
+                f"echo 'mcap_header' > /mnt/wsl/{mount_name}/mcap/rosbag2_test/recording.mcap && "
+                f"chmod 700 /mnt/wsl/{mount_name}/mcap && "
+                f"chmod 700 /mnt/wsl/{mount_name}/mcap/rosbag2_test && "
+                f"chmod 600 /mnt/wsl/{mount_name}/mcap/rosbag2_test/recording.mcap && "
+                f"mount -o remount,ro /mnt/wsl/{mount_name}"
+            )
+            proc = subprocess.run(
+                ["wsl.exe", "-d", self.mounter.distro, "-u", "root", "--", "bash", "-c", setup_script],
+                capture_output=True,
+                text=True
+            )
+            self.assertEqual(proc.returncode, 0, f"setup_script failed: {proc.stderr}")
+
+            # 2. Test detect_rosbag_dirs
+            detected = self.mounter.detect_rosbag_dirs(mount_name)
+            self.assertTrue(any("mcap" in d for d in detected), f"mcap not detected in {detected}")
+
+            # 3. Call fix_rosbag_permissions
+            ok, fix_msg = self.mounter.fix_rosbag_permissions(mount_name)
+            self.assertTrue(ok, f"fix_rosbag_permissions failed: {fix_msg}")
+
+            # 4. Verify that permissions allow traversal and reading from Windows
+            test_file_win = os.path.join(unc_path, "mcap", "rosbag2_test", "recording.mcap")
+            self.assertTrue(os.path.exists(test_file_win), f"File {test_file_win} not accessible from Windows")
+            with open(test_file_win, "r", encoding="utf-8") as f:
+                content = f.read().strip()
+            self.assertEqual(content, "mcap_header")
+
+        finally:
+            self.mounter.unmount_image_file(mount_name, self.test_img)
+
 if __name__ == "__main__":
     unittest.main()
