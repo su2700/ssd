@@ -77,7 +77,7 @@ cd ssd
 
 - 脚本会自动检测您电脑中的 `pythonw.exe` / `python.exe` 路径与项目入口。
 - 自动在当前用户的 **Windows 桌面** 上生成名为 **`Ext4-Mounter`** 的快捷方式。
-- 提示 `[OK] 安装成功！已在桌面生成 "Ext4-Mounter" 快捷方式！`。
+- 提示 `[OK] Ext4-Mounter shortcut created on your desktop.`。
 
 至此安装已全部完成！后续无需再进入文件夹或打开终端，在桌面上双击即可一键打开应用。
 
@@ -92,7 +92,7 @@ cd ssd
 ```pwsh
 python -m unittest discover -s tests
 ```
-若显示 `Ran 6 tests in ... OK`，说明环境一切就绪。
+测试依赖本机 WSL 环境；无 WSL 的环境可运行 `python -m unittest discover -s tests -p test_shell_compat.py` 验证中英文终端兼容性。
 
 ---
 
@@ -170,11 +170,17 @@ ssd/
 ```pwsh
 python -m unittest discover -s tests
 ```
-所有 6 项测试（磁盘枚举、分区识别、路径转换、WSL 挂载/卸载）均已自动通过。
+磁盘与挂载集成测试需要已配置的 WSL2 发行版。终端兼容性回归测试不需要挂载或格式化磁盘。
 
 ---
 
 ## ❓ 常见问题与排查 (FAQ)
+
+**中文 CMD / PowerShell 中出现乱码或“不是内部或外部命令”？**
+- 更新后重新运行 `install_desktop_shortcut.bat`。批处理入口使用纯 ASCII 与 Windows CRLF 换行，无需修改系统语言或全局代码页；界面仍为中文。
+- 在 PowerShell 中使用 `./install_desktop_shortcut.bat`、`./start_ext4_mounter.bat` 或 `./start_as_admin.bat`；在 CMD 中直接运行相同文件名。
+- PowerShell 命令显式使用 UTF-8 输出，WSL 输出兼容 UTF-16LE、UTF-8 和本机中文编码。发行版检测不依赖英文表头或英文运行状态。
+- 项目和用户目录支持中文及空格；如果提示找不到 Python，请安装 Python 并添加到 PATH 后重试，无需为安装快捷方式额外提权。
 
 **Q1：双击桌面图标没有反应，或提示找不到 Python？**
 - 请确认已安装 Python 3.8+ 并添加到了系统环境变量（PATH）。

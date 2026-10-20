@@ -9,6 +9,9 @@ $pythonCmd = (Get-Command pythonw.exe -ErrorAction SilentlyContinue)
 if (-not $pythonCmd) {
     $pythonCmd = (Get-Command python.exe -ErrorAction SilentlyContinue)
 }
+if (-not $pythonCmd) {
+    throw 'Python 3.8+ was not found. Install Python, add it to PATH, and run this installer again.'
+}
 $pythonExe = $pythonCmd.Source
 
 $desktop = [Environment]::GetFolderPath("Desktop")

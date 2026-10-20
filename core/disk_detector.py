@@ -3,7 +3,10 @@ import json
 import os
 import re
 import subprocess
+
 from typing import Dict, List, Optional, Any
+
+from .shell_utils import decode_output, run_powershell
 
 LINUX_PARTITION_GUIDS = {
     "{0fc63daf-8483-4772-8e79-3d69d8477de4}",  # Linux filesystem data
@@ -39,31 +42,27 @@ def get_wsl_distros() -> Dict[str, Any]:
             text=False,
             timeout=10
         )
-        output = ""
-        for encoding in ("utf-16le", "utf-8", "gbk"):
-            try:
-                output = proc.stdout.decode(encoding)
-                if "NAME" in output or "NAME" in output.replace(" ", ""):
-                    break
-            except Exception:
+        if proc.returncode != 0:
+            result["error"] = decode_output(proc.stderr or proc.stdout, wsl_management=True).strip()
+            return result
+        output = decode_output(proc.stdout)
+        # Ignore translated column headings and states; parse only the name and
+        # final WSL version column, whose format does not depend on UI language.
+        for line in output.splitlines():
+            match = re.match(r"^\s*(\*)?\s*(.+?)\s{2,}.*?\s+([12])\s*$", line)
+            if not match:
                 continue
-
-        lines = output.strip().splitlines()
-        for line in lines[1:]:
-            line_str = line.strip()
-            if not line_str:
-                continue
-            is_def = line_str.startswith("*")
-            cleaned = line_str.lstrip("*").strip()
-            parts = [p for p in cleaned.split() if p]
-            if parts:
-                name = parts[0]
-                state = parts[1] if len(parts) > 1 else "Unknown"
-                result["distros"].append(name)
-                if is_def:
-                    result["default"] = name
-                if state.lower() == "running":
-                    result["running"].append(name)
+            name = match.group(2).strip()
+            result["distros"].append(name)
+            if match.group(1):
+                result["default"] = name
+        running = subprocess.run(
+            ["wsl.exe", "--list", "--running", "--quiet"],
+            capture_output=True, timeout=10
+        )
+        if running.returncode == 0:
+            names = decode_output(running.stdout).strip().splitlines()
+            result["running"] = [n.strip() for n in names if n.strip() in result["distros"]]
 
         if not result["default"] and result["distros"]:
             if "Ubuntu" in result["distros"]:
@@ -83,10 +82,8 @@ def is_system_disk(disk_index: int) -> bool:
         return True
     try:
         ps_cmd = f"Get-Disk -Number {disk_index} | Select-Object IsBoot, IsSystem | ConvertTo-Json -Compress"
-        proc = subprocess.run(
-            ["powershell.exe", "-NoProfile", "-Command", ps_cmd],
-            capture_output=True,
-            text=True,
+        proc = run_powershell(
+            ps_cmd,
             timeout=10
         )
         if proc.returncode == 0 and proc.stdout.strip():
@@ -116,10 +113,8 @@ def get_physical_disks() -> List[Dict[str, Any]]:
         "ConvertTo-Json -Compress"
     )
     try:
-        proc = subprocess.run(
-            ["powershell.exe", "-NoProfile", "-Command", ps_cmd],
-            capture_output=True,
-            text=True,
+        proc = run_powershell(
+            ps_cmd,
             timeout=15
         )
         if proc.returncode == 0 and proc.stdout.strip():
@@ -160,10 +155,8 @@ def get_physical_disks() -> List[Dict[str, Any]]:
         "ConvertTo-Json -Compress"
     )
     try:
-        proc = subprocess.run(
-            ["powershell.exe", "-NoProfile", "-Command", ps_cmd_fallback],
-            capture_output=True,
-            text=True,
+        proc = run_powershell(
+            ps_cmd_fallback,
             timeout=15
         )
         if proc.returncode != 0 or not proc.stdout.strip():
@@ -203,10 +196,8 @@ def get_disk_partitions(disk_index: int) -> List[Dict[str, Any]]:
         "ConvertTo-Json -Compress"
     )
     try:
-        proc = subprocess.run(
-            ["powershell.exe", "-NoProfile", "-Command", ps_cmd],
-            capture_output=True,
-            text=True,
+        proc = run_powershell(
+            ps_cmd,
             timeout=15
         )
         if proc.returncode != 0 or not proc.stdout.strip():

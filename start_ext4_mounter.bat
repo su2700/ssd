@@ -1,11 +1,8 @@
 @echo off
-chcp 65001 >nul
-title Ext4 一键挂载小工具
-cd /d "%~dp0"
-
-where pythonw >nul 2>&1
-if %ERRORLEVEL% EQU 0 (
-    start "" pythonw main.py
-) else (
-    start "" python main.py
+setlocal
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\launch.ps1"
+if errorlevel 1 (
+    pause
+    exit /b 1
 )
+exit /b 0

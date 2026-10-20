@@ -1,6 +1,9 @@
 import os
 import subprocess
+
 from typing import Tuple
+
+from .shell_utils import run_text, run_powershell
 
 def open_in_explorer(target_path: str) -> bool:
     """
@@ -25,7 +28,7 @@ def map_drive_letter(drive_letter: str, unc_path: str) -> Tuple[bool, str]:
     clean_letter = drive_letter.rstrip(":") + ":"
     cmd = f"net use {clean_letter} \"{unc_path}\" /persistent:no"
     try:
-        proc = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+        proc = run_text(cmd, shell=True, capture_output=True, text=True)
         if proc.returncode == 0:
             return True, f"成功将 {unc_path} 映射至盘符 {clean_letter}"
         else:
@@ -40,7 +43,7 @@ def unmap_drive_letter(drive_letter: str) -> Tuple[bool, str]:
     clean_letter = drive_letter.rstrip(":") + ":"
     cmd = f"net use {clean_letter} /delete /y"
     try:
-        proc = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+        proc = run_text(cmd, shell=True, capture_output=True, text=True)
         return True, f"已释放盘符 {clean_letter}"
     except Exception as e:
         return False, str(e)
@@ -73,10 +76,8 @@ def create_desktop_shortcut(
         f"$s.Save()"
     )
     try:
-        proc = subprocess.run(
-            ["powershell.exe", "-NoProfile", "-Command", ps_cmd],
-            capture_output=True,
-            text=True
+        proc = run_powershell(
+            ps_cmd,
         )
         if proc.returncode == 0 and os.path.exists(lnk_path):
             return True, lnk_path

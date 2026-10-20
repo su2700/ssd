@@ -3,9 +3,12 @@ import json
 import os
 import re
 import subprocess
+
 import tempfile
 import time
 from typing import Dict, List, Optional, Tuple, Any
+
+from .shell_utils import decode_output, run_text, run_powershell
 
 from .disk_detector import is_admin, get_wsl_distros
 
@@ -55,20 +58,18 @@ def run_elevated_command(cmd_line: str, timeout: int = 60) -> Tuple[int, str]:
     )
 
     try:
-        with open(bat_file, "w", encoding="utf-8") as f:
+        with open(bat_file, "w", encoding="utf-8", newline="") as f:
             f.write(bat_content)
 
         # PowerShell command to elevate batch script
         ps_cmd = (
             f"Start-Process -FilePath 'cmd.exe' "
-            f"-ArgumentList '/c \"{bat_file}\"' "
+            f"-ArgumentList '/d /c \"{bat_file.replace(chr(39), chr(39) * 2)}\"' "
             f"-Verb RunAs -WindowStyle Hidden -Wait"
         )
 
-        proc = subprocess.run(
-            ["powershell.exe", "-NoProfile", "-Command", ps_cmd],
-            capture_output=True,
-            text=True,
+        proc = run_powershell(
+            ps_cmd,
             timeout=timeout
         )
 
@@ -76,15 +77,15 @@ def run_elevated_command(cmd_line: str, timeout: int = 60) -> Tuple[int, str]:
         output = ""
         if os.path.exists(out_file):
             try:
-                with open(out_file, "r", encoding="utf-8", errors="replace") as f:
-                    output += f.read()
+                with open(out_file, "rb") as f:
+                    output += decode_output(f.read(), wsl_management=cmd_line.lower().startswith("wsl.exe "))
             except Exception:
                 pass
 
         if os.path.exists(err_file):
             try:
-                with open(err_file, "r", encoding="utf-8", errors="replace") as f:
-                    err_text = f.read().strip()
+                with open(err_file, "rb") as f:
+                    err_text = decode_output(f.read(), wsl_management=cmd_line.lower().startswith("wsl.exe ")).strip()
                     if err_text:
                         output += "\n" + err_text
             except Exception:
@@ -192,7 +193,7 @@ class WslMounter:
             mount_cmd += " --options ro"
 
         if is_admin():
-            proc = subprocess.run(mount_cmd, shell=True, capture_output=True, text=True)
+            proc = run_text(mount_cmd, shell=True, capture_output=True, text=True)
             exit_code = proc.returncode
             output = (proc.stdout + " " + proc.stderr).strip()
         else:
@@ -234,7 +235,7 @@ class WslMounter:
         unmount_cmd = f"wsl.exe --unmount {device_path}"
 
         if is_admin():
-            proc = subprocess.run(unmount_cmd, shell=True, capture_output=True, text=True)
+            proc = run_text(unmount_cmd, shell=True, capture_output=True, text=True)
             exit_code = proc.returncode
             output = (proc.stdout + " " + proc.stderr).strip()
         else:
@@ -278,7 +279,7 @@ class WslMounter:
             if read_only:
                 vhd_cmd += " --options ro"
             if is_admin():
-                proc = subprocess.run(vhd_cmd, shell=True, capture_output=True, text=True)
+                proc = run_text(vhd_cmd, shell=True, capture_output=True, text=True)
                 exit_code = proc.returncode
                 output = (proc.stdout + " " + proc.stderr).strip()
             else:
@@ -306,7 +307,7 @@ class WslMounter:
                     f"mount -o loop,rw '{wsl_file_path}' '/mnt/wsl/{mount_name}'"
                 )
             cmd = ["wsl.exe", "-d", self.distro, "-u", "root", "--", "bash", "-c", bash_script]
-            proc = subprocess.run(cmd, capture_output=True, text=True)
+            proc = run_text(cmd, capture_output=True, text=True)
             if proc.returncode != 0:
                 return False, "", f"镜像挂载失败 (代码: {proc.returncode}): {proc.stderr.strip() or proc.stdout.strip()}"
 
@@ -338,7 +339,7 @@ class WslMounter:
         if ext in (".vhdx", ".vhd") and file_path:
             unmount_cmd = f"wsl.exe --unmount \"{file_path}\""
             if is_admin():
-                proc = subprocess.run(unmount_cmd, shell=True, capture_output=True, text=True)
+                proc = run_text(unmount_cmd, shell=True, capture_output=True, text=True)
                 exit_code = proc.returncode
                 output = proc.stdout + proc.stderr
             else:
@@ -347,7 +348,7 @@ class WslMounter:
             # Loop mount unmount
             bash_script = f"umount '/mnt/wsl/{mount_name}' && rmdir '/mnt/wsl/{mount_name}'"
             cmd = ["wsl.exe", "-d", self.distro, "-u", "root", "--", "bash", "-c", bash_script]
-            proc = subprocess.run(cmd, capture_output=True, text=True)
+            proc = run_text(cmd, capture_output=True, text=True)
             exit_code = proc.returncode
             output = proc.stderr or proc.stdout
 
@@ -453,7 +454,7 @@ class WslMounter:
             )
 
         cmd = ["wsl.exe", "-d", self.distro, "-u", "root", "--", "bash", "-c", bash_script]
-        proc = subprocess.run(cmd, capture_output=True, text=True)
+        proc = run_text(cmd, capture_output=True, text=True)
 
         if proc.returncode == 0 or "Bad message" in proc.stderr:
             if mode == "rw" and not restore_ro:
@@ -482,7 +483,7 @@ class WslMounter:
             f"find '{mount_path}' -maxdepth 2 -type d \\( -iname '*mcap*' -o -iname '*bag*' \\) 2>/dev/null | head -n 10"
         ]
         try:
-            res = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+            res = run_text(cmd, capture_output=True, text=True, timeout=5)
             if res.returncode == 0 and res.stdout.strip():
                 lines = [l.strip() for l in res.stdout.strip().splitlines() if l.strip()]
                 rel_paths = []
@@ -530,7 +531,7 @@ class WslMounter:
             f"fi"
         )
         cmd = ["wsl.exe", "-d", self.distro, "-u", "root", "--", "bash", "-c", bash_script]
-        proc = subprocess.run(cmd, capture_output=True, text=True)
+        proc = run_text(cmd, capture_output=True, text=True)
 
         if proc.returncode == 0:
             scope = f"目录 [{target_dir}]" if target_dir else "全盘/mcap 目录"

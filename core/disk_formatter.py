@@ -1,8 +1,11 @@
 import os
 import re
 import subprocess
+
 import time
 from typing import Dict, List, Optional, Tuple, Any
+
+from .shell_utils import powershell_command, run_text, run_powershell
 
 from .disk_detector import is_admin, is_system_disk, get_disk_partitions
 from .wsl_mounter import WslMounter, get_best_distro, run_elevated_command
@@ -24,7 +27,7 @@ def get_wsl_block_devices(distro: str) -> Dict[str, Dict[str, Any]]:
     """
     cmd = ["wsl.exe", "-d", distro, "-u", "root", "--", "lsblk", "-d", "-n", "-b", "-o", "NAME,SIZE,TYPE"]
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+        proc = run_text(cmd, capture_output=True, text=True, timeout=10)
         devices = {}
         if proc.returncode == 0:
             for line in proc.stdout.strip().splitlines():
@@ -62,7 +65,7 @@ def get_device_partitions(distro: str, dev_name: str) -> List[str]:
     """
     cmd = ["wsl.exe", "-d", distro, "-u", "root", "--", "lsblk", "-n", "-o", "NAME,TYPE", f"/dev/{dev_name}"]
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+        proc = run_text(cmd, capture_output=True, text=True, timeout=10)
         parts = []
         if proc.returncode == 0:
             for line in proc.stdout.strip().splitlines():
@@ -90,9 +93,9 @@ def initialize_disk_gpt_with_partition(disk_index: int) -> Tuple[bool, str]:
         f"$part = New-Partition -DiskNumber {disk_index} -UseMaximumSize -GptType '{{0fc63daf-8483-4772-8e79-3d69d8477de4}}'; "
         f"if ($part) {{ 'SUCCESS' }} else {{ 'FAILED' }}"
     )
-    cmd = f"powershell.exe -NoProfile -Command \"{ps_script}\""
+    cmd = subprocess.list2cmdline(powershell_command(ps_script))
     if is_admin():
-        proc = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+        proc = run_powershell(ps_script)
         out = (proc.stdout + " " + proc.stderr).strip()
         if proc.returncode == 0 and "SUCCESS" in out:
             return True, "磁盘 GPT 初始化与 Linux 分区创建成功"
@@ -110,7 +113,7 @@ def mount_bare_disk(disk_index: int) -> Tuple[bool, str]:
     device_path = f"\\\\.\\PHYSICALDRIVE{disk_index}"
     mount_cmd = f"wsl.exe --mount {device_path} --bare"
     if is_admin():
-        proc = subprocess.run(mount_cmd, shell=True, capture_output=True, text=True)
+        proc = run_text(mount_cmd, shell=True, capture_output=True, text=True)
         code = proc.returncode
         out = (proc.stdout + " " + proc.stderr).strip()
     else:
@@ -126,7 +129,7 @@ def unmount_bare_disk(disk_index: int) -> Tuple[bool, str]:
     device_path = f"\\\\.\\PHYSICALDRIVE{disk_index}"
     unmount_cmd = f"wsl.exe --unmount {device_path}"
     if is_admin():
-        proc = subprocess.run(unmount_cmd, shell=True, capture_output=True, text=True)
+        proc = run_text(unmount_cmd, shell=True, capture_output=True, text=True)
         code = proc.returncode
         out = (proc.stdout + " " + proc.stderr).strip()
     else:
@@ -202,7 +205,7 @@ def format_physical_disk_full(
         format_cmd = (
             f"mkfs.ext4 -F -O 64bit -m 1 -E nodiscard -L '{clean_label}' {target_dev}"
         )
-        proc = subprocess.run(
+        proc = run_text(
             ["wsl.exe", "-d", distro, "-u", "root", "--", "bash", "-c", format_cmd],
             capture_output=True,
             text=True,
@@ -277,7 +280,7 @@ def format_physical_partition(
         format_cmd = (
             f"mkfs.ext4 -F -O 64bit -m 1 -E nodiscard -L '{clean_label}' {target_dev}"
         )
-        proc = subprocess.run(
+        proc = run_text(
             ["wsl.exe", "-d", distro, "-u", "root", "--", "bash", "-c", format_cmd],
             capture_output=True,
             text=True,
@@ -310,9 +313,9 @@ def format_physical_partition(
                 f"-GptType '{{0fc63daf-8483-4772-8e79-3d69d8477de4}}' -ErrorAction SilentlyContinue"
             )
             if is_admin():
-                subprocess.run(f"powershell.exe -NoProfile -Command \"{ps_set}\"", shell=True, capture_output=True)
+                run_powershell(ps_set)
             else:
-                run_elevated_command(f"powershell.exe -NoProfile -Command \"{ps_set}\"")
+                run_elevated_command(subprocess.list2cmdline(powershell_command(ps_set)))
         except Exception:
             pass
 
