@@ -2,7 +2,19 @@
 
 import base64
 import locale
+import os
 import subprocess
+
+
+def native_system_executable(name: str) -> str:
+    """Sysnative bypasses WOW64 redirection when Python is a 32-bit process."""
+    if os.name == "nt":
+        windows = os.environ.get("SystemRoot", r"C:\Windows")
+        for folder in ("Sysnative", "System32"):
+            path = os.path.join(windows, folder, name)
+            if os.path.isfile(path):
+                return path
+    return name
 
 
 def decode_output(data: bytes, wsl_management: bool = False) -> str:
@@ -33,8 +45,20 @@ def run_text(*args, **kwargs):
     kwargs.pop("text", None)
     command = args[0] if args else kwargs.get("args", [])
     tokens = command.split() if isinstance(command, str) else command
-    management = bool(tokens and tokens[0].lower() == "wsl.exe" and
+    management = bool(tokens and os.path.basename(tokens[0]).lower() == "wsl.exe" and
                       not any(flag in tokens for flag in ("-e", "--exec", "--")))
+    if isinstance(command, (list, tuple)) and command and command[0].lower() == "wsl.exe":
+        command = [native_system_executable("wsl.exe"), *command[1:]]
+        if args:
+            args = (command, *args[1:])
+        else:
+            kwargs["args"] = command
+    elif isinstance(command, str) and command.lower().startswith("wsl.exe "):
+        command = subprocess.list2cmdline([native_system_executable("wsl.exe")]) + command[7:]
+        if args:
+            args = (command, *args[1:])
+        else:
+            kwargs["args"] = command
     proc = subprocess.run(*args, **kwargs)
     if isinstance(proc.stdout, bytes):
         proc.stdout = decode_output(proc.stdout, wsl_management=management)
@@ -51,7 +75,7 @@ def powershell_command(script: str):
         "$OutputEncoding = [Console]::OutputEncoding; "
     )
     encoded = base64.b64encode((preamble + script).encode("utf-16le")).decode("ascii")
-    return ["powershell.exe", "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded]
+    return [native_system_executable("powershell.exe"), "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded]
 
 
 def run_powershell(script: str, **kwargs):

@@ -5,7 +5,8 @@ import subprocess
 import time
 from typing import Dict, List, Optional, Tuple, Any
 
-from .shell_utils import powershell_command, run_text, run_powershell
+from .shell_utils import powershell_command, run_text, run_powershell, native_system_executable
+from .windows_compat import get_mount_support_error
 
 from .disk_detector import is_admin, is_system_disk, get_disk_partitions
 from .wsl_mounter import WslMounter, get_best_distro, run_elevated_command
@@ -25,7 +26,7 @@ def get_wsl_block_devices(distro: str) -> Dict[str, Dict[str, Any]]:
     Query current block devices inside WSL2 using lsblk.
     Returns a dict mapping device name (e.g. 'sda') to info.
     """
-    cmd = ["wsl.exe", "-d", distro, "-u", "root", "--", "lsblk", "-d", "-n", "-b", "-o", "NAME,SIZE,TYPE"]
+    cmd = [native_system_executable("wsl.exe"), "-d", distro, "-u", "root", "--", "lsblk", "-d", "-n", "-b", "-o", "NAME,SIZE,TYPE"]
     try:
         proc = run_text(cmd, capture_output=True, text=True, timeout=10)
         devices = {}
@@ -63,7 +64,7 @@ def get_device_partitions(distro: str, dev_name: str) -> List[str]:
     """
     Returns list of partition device names under dev_name, e.g. ['sde1'].
     """
-    cmd = ["wsl.exe", "-d", distro, "-u", "root", "--", "lsblk", "-n", "-o", "NAME,TYPE", f"/dev/{dev_name}"]
+    cmd = [native_system_executable("wsl.exe"), "-d", distro, "-u", "root", "--", "lsblk", "-n", "-o", "NAME,TYPE", f"/dev/{dev_name}"]
     try:
         proc = run_text(cmd, capture_output=True, text=True, timeout=10)
         parts = []
@@ -157,6 +158,9 @@ def format_physical_disk_full(
         return False, f"安全阻断：磁盘 {disk_index} 包含 Windows 系统或引导文件，严禁格式化！"
 
     distro = get_best_distro(distro)
+    error = get_mount_support_error(named=False, distro=distro)
+    if error:
+        return False, error
     clean_label = sanitize_label(label)
 
     # 1. Unmount any active WSL mounts for this disk
@@ -190,7 +194,7 @@ def format_physical_disk_full(
         if parts:
             target_dev = f"/dev/{parts[0]}"
         else:
-            test_cmd = ["wsl.exe", "-d", distro, "-u", "root", "--", "test", "-b", f"/dev/{dev_name}1"]
+            test_cmd = [native_system_executable("wsl.exe"), "-d", distro, "-u", "root", "--", "test", "-b", f"/dev/{dev_name}1"]
             if subprocess.run(test_cmd).returncode == 0:
                 target_dev = f"/dev/{dev_name}1"
             else:
@@ -206,7 +210,7 @@ def format_physical_disk_full(
             f"mkfs.ext4 -F -O 64bit -m 1 -E nodiscard -L '{clean_label}' {target_dev}"
         )
         proc = run_text(
-            ["wsl.exe", "-d", distro, "-u", "root", "--", "bash", "-c", format_cmd],
+            [native_system_executable("wsl.exe"), "-d", distro, "-u", "root", "--", "bash", "-c", format_cmd],
             capture_output=True,
             text=True,
             timeout=120
@@ -226,7 +230,7 @@ def format_physical_disk_full(
             f"rmdir /mnt/_ext4_fmt_init"
         )
         subprocess.run(
-            ["wsl.exe", "-d", distro, "-u", "root", "--", "bash", "-c", init_perm_cmd],
+            [native_system_executable("wsl.exe"), "-d", distro, "-u", "root", "--", "bash", "-c", init_perm_cmd],
             capture_output=True,
             timeout=20
         )
@@ -250,6 +254,9 @@ def format_physical_partition(
         return False, f"安全阻断：磁盘 {disk_index} 包含 Windows 系统或引导文件，严禁格式化！"
 
     distro = get_best_distro(distro)
+    error = get_mount_support_error(named=False, distro=distro)
+    if error:
+        return False, error
     clean_label = sanitize_label(label)
 
     # 1. Unmount if currently mounted
@@ -272,7 +279,7 @@ def format_physical_partition(
 
         target_dev = f"/dev/{dev_name}{partition_number}"
         # Verify block device exists
-        test_cmd = ["wsl.exe", "-d", distro, "-u", "root", "--", "test", "-b", target_dev]
+        test_cmd = [native_system_executable("wsl.exe"), "-d", distro, "-u", "root", "--", "test", "-b", target_dev]
         if subprocess.run(test_cmd).returncode != 0:
             return False, f"未在 WSL2 中找到分区设备 {target_dev}"
 
@@ -281,7 +288,7 @@ def format_physical_partition(
             f"mkfs.ext4 -F -O 64bit -m 1 -E nodiscard -L '{clean_label}' {target_dev}"
         )
         proc = run_text(
-            ["wsl.exe", "-d", distro, "-u", "root", "--", "bash", "-c", format_cmd],
+            [native_system_executable("wsl.exe"), "-d", distro, "-u", "root", "--", "bash", "-c", format_cmd],
             capture_output=True,
             text=True,
             timeout=120
@@ -301,7 +308,7 @@ def format_physical_partition(
             f"rmdir /mnt/_ext4_fmt_init"
         )
         subprocess.run(
-            ["wsl.exe", "-d", distro, "-u", "root", "--", "bash", "-c", init_perm_cmd],
+            [native_system_executable("wsl.exe"), "-d", distro, "-u", "root", "--", "bash", "-c", init_perm_cmd],
             capture_output=True,
             timeout=20
         )

@@ -1,5 +1,6 @@
 import ctypes
 import json
+import logging
 import os
 import re
 import subprocess
@@ -8,11 +9,13 @@ import tempfile
 import time
 from typing import Dict, List, Optional, Tuple, Any
 
-from .shell_utils import decode_output, run_text, run_powershell
+from .shell_utils import decode_output, run_text, run_powershell, native_system_executable
+from .windows_compat import get_mount_support_error, get_wsl2_support_error
 
 from .disk_detector import is_admin, get_wsl_distros
 
 STATE_FILE = os.path.join(os.path.expanduser("~"), ".ext4_mounter_state.json")
+logger = logging.getLogger("ext4_mounter.wsl")
 
 def windows_to_wsl_path(win_path: str) -> str:
     """Convert Windows path C:\\foo\\bar to WSL path /mnt/c/foo/bar."""
@@ -27,12 +30,13 @@ def windows_to_wsl_path(win_path: str) -> str:
 def get_best_distro(preferred_distro: Optional[str] = None) -> str:
     """Get the WSL distribution to use, defaulting to Ubuntu or default."""
     info = get_wsl_distros()
-    distros = info.get("distros", [])
+    distros = [name for name in info.get("distros", [])
+               if info.get("versions", {}).get(name) == 2]
     if preferred_distro and preferred_distro in distros:
         return preferred_distro
     if "Ubuntu" in distros:
         return "Ubuntu"
-    if info.get("default"):
+    if info.get("default") in distros:
         return info["default"]
     if distros:
         return distros[0]
@@ -121,8 +125,15 @@ def load_saved_mounts() -> List[Dict[str, Any]]:
     if os.path.exists(STATE_FILE):
         try:
             with open(STATE_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
+                mounts = json.load(f)
+            if not isinstance(mounts, list) or any(
+                not isinstance(m, dict) or not isinstance(m.get("mount_name"), str)
+                or not m["mount_name"].strip() for m in mounts
+            ):
+                raise ValueError("Saved mounts must be a list of objects with mount_name")
+            return mounts
         except Exception:
+            logger.exception("Cannot read saved mount state: %s", STATE_FILE)
             return []
     return []
 
@@ -150,15 +161,16 @@ def unregister_mount(mount_name: str):
 
 
 class WslMounter:
-    def __init__(self, preferred_distro: Optional[str] = None):
-        self.distro = get_best_distro(preferred_distro)
+    def __init__(self, preferred_distro: Optional[str] = None, discover: bool = True):
+        # The GUI defers external commands until its event loop is running.
+        self.distro = get_best_distro(preferred_distro) if discover else (preferred_distro or "Ubuntu")
 
     def set_distro(self, distro: str):
         self.distro = distro
 
     def get_unc_path(self, mount_name: str) -> str:
         """Return the Windows UNC path to the mountpoint."""
-        return f"\\\\wsl.localhost\\{self.distro}\\mnt\\wsl\\{mount_name}"
+        return f"\\\\wsl$\\{self.distro}\\mnt\\wsl\\{mount_name}"
 
     def check_mount_exists(self, mount_name: str) -> bool:
         """Check if the mount folder exists in Windows or WSL."""
@@ -166,8 +178,11 @@ class WslMounter:
         if os.path.exists(unc):
             return True
         # Check via WSL
-        cmd = ["wsl.exe", "-d", self.distro, "-e", "test", "-d", f"/mnt/wsl/{mount_name}"]
-        res = subprocess.run(cmd, capture_output=True)
+        cmd = [native_system_executable("wsl.exe"), "-d", self.distro, "-e", "test", "-d", f"/mnt/wsl/{mount_name}"]
+        res = subprocess.run(cmd, capture_output=True, timeout=10)
+        if res.returncode not in (0, 1):
+            raise RuntimeError(decode_output(res.stderr or res.stdout, wsl_management=True).strip()
+                               or f"WSL mount check failed ({res.returncode})")
         return res.returncode == 0
 
     def mount_physical_disk(
@@ -182,6 +197,9 @@ class WslMounter:
         Mount a physical disk partition into WSL2.
         Returns: (success: bool, unc_path: str, message: str)
         """
+        error = get_mount_support_error(distro=self.distro)
+        if error:
+            return False, "", error
         device_path = f"\\\\.\\PHYSICALDRIVE{disk_index}"
         mount_cmd = (
             f"wsl.exe --mount {device_path} "
@@ -274,6 +292,9 @@ class WslMounter:
         unc_path = self.get_unc_path(mount_name)
 
         if ext in (".vhdx", ".vhd"):
+            error = get_mount_support_error(vhd=True, distro=self.distro)
+            if error:
+                return False, "", error
             # Native WSL VHD mount
             vhd_cmd = f"wsl.exe --mount \"{abs_win_path}\" --vhd --name \"{mount_name}\""
             if read_only:
@@ -289,6 +310,9 @@ class WslMounter:
                 return False, "", f"VHD 挂载失败: {output}"
         else:
             # Raw .img, .ext4, .raw image - mount via WSL2 loop device (NO Windows admin required!)
+            error = get_wsl2_support_error(self.distro)
+            if error:
+                return False, "", error
             wsl_file_path = windows_to_wsl_path(abs_win_path)
             if read_only and not auto_chmod_777:
                 bash_script = (
@@ -306,7 +330,7 @@ class WslMounter:
                     f"mkdir -p '/mnt/wsl/{mount_name}' && "
                     f"mount -o loop,rw '{wsl_file_path}' '/mnt/wsl/{mount_name}'"
                 )
-            cmd = ["wsl.exe", "-d", self.distro, "-u", "root", "--", "bash", "-c", bash_script]
+            cmd = [native_system_executable("wsl.exe"), "-d", self.distro, "-u", "root", "--", "bash", "-c", bash_script]
             proc = run_text(cmd, capture_output=True, text=True)
             if proc.returncode != 0:
                 return False, "", f"镜像挂载失败 (代码: {proc.returncode}): {proc.stderr.strip() or proc.stdout.strip()}"
@@ -347,7 +371,7 @@ class WslMounter:
         else:
             # Loop mount unmount
             bash_script = f"umount '/mnt/wsl/{mount_name}' && rmdir '/mnt/wsl/{mount_name}'"
-            cmd = ["wsl.exe", "-d", self.distro, "-u", "root", "--", "bash", "-c", bash_script]
+            cmd = [native_system_executable("wsl.exe"), "-d", self.distro, "-u", "root", "--", "bash", "-c", bash_script]
             proc = run_text(cmd, capture_output=True, text=True)
             exit_code = proc.returncode
             output = proc.stderr or proc.stdout
@@ -379,7 +403,7 @@ class WslMounter:
 
         # Also run generic wsl --unmount to ensure any detached disks are released
         if is_admin():
-            subprocess.run("wsl.exe --unmount", shell=True, capture_output=True)
+            run_text("wsl.exe --unmount", shell=True, capture_output=True)
         else:
             run_elevated_command("wsl.exe --unmount")
 
@@ -395,6 +419,10 @@ class WslMounter:
             m_name = m.get("mount_name")
             if self.check_mount_exists(m_name):
                 m["status"] = "Active"
+                # Migrate displayed paths from releases using the newer alias.
+                unc = m.get("unc_path", "")
+                if isinstance(unc, str) and unc.lower().startswith("\\\\wsl.localhost\\"):
+                    m["unc_path"] = "\\\\wsl$\\" + unc[len("\\\\wsl.localhost\\"):]
                 active.append(m)
             else:
                 # Mount is no longer active, prune it
@@ -453,7 +481,7 @@ class WslMounter:
                 f"fi"
             )
 
-        cmd = ["wsl.exe", "-d", self.distro, "-u", "root", "--", "bash", "-c", bash_script]
+        cmd = [native_system_executable("wsl.exe"), "-d", self.distro, "-u", "root", "--", "bash", "-c", bash_script]
         proc = run_text(cmd, capture_output=True, text=True)
 
         if proc.returncode == 0 or "Bad message" in proc.stderr:
@@ -479,7 +507,7 @@ class WslMounter:
         if not self.check_mount_exists(mount_name):
             return []
         cmd = [
-            "wsl.exe", "-d", self.distro, "-u", "root", "--", "bash", "-c",
+            native_system_executable("wsl.exe"), "-d", self.distro, "-u", "root", "--", "bash", "-c",
             f"find '{mount_path}' -maxdepth 2 -type d \\( -iname '*mcap*' -o -iname '*bag*' \\) 2>/dev/null | head -n 10"
         ]
         try:
@@ -530,7 +558,7 @@ class WslMounter:
             f"  setfacl -R -m u::rwx,g::rwx,o::rwx,m::rwx '{target}' 2>/dev/null || true; "
             f"fi"
         )
-        cmd = ["wsl.exe", "-d", self.distro, "-u", "root", "--", "bash", "-c", bash_script]
+        cmd = [native_system_executable("wsl.exe"), "-d", self.distro, "-u", "root", "--", "bash", "-c", bash_script]
         proc = run_text(cmd, capture_output=True, text=True)
 
         if proc.returncode == 0:
@@ -550,7 +578,7 @@ class WslMounter:
         if not self.check_mount_exists(mount_name):
             return False
         bash_script = f"find '{mount_path}' ! -perm 777 -exec chmod 777 {{}} + 2>/dev/null || true"
-        cmd = ["wsl.exe", "-d", self.distro, "-u", "root", "--", "bash", "-c", bash_script]
+        cmd = [native_system_executable("wsl.exe"), "-d", self.distro, "-u", "root", "--", "bash", "-c", bash_script]
         try:
             res = subprocess.run(cmd, capture_output=True, timeout=10)
             return res.returncode == 0

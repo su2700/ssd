@@ -59,7 +59,7 @@ class TestShellEncoding(unittest.TestCase):
                         'core.shell_utils.locale.getpreferredencoding', return_value='cp936'
                     ):
                         info = get_wsl_distros()
-                    self.assertEqual(info, {'default': 'Ubuntu', 'distros': ['Ubuntu', 'Debian'], 'running': ['Ubuntu']})
+                    self.assertEqual(info, {'default': 'Ubuntu', 'distros': ['Ubuntu', 'Debian'], 'running': ['Ubuntu'], 'versions': {'Ubuntu': 2, 'Debian': 2}})
 
     def test_wsl_failure_is_not_a_distro(self):
         error = '没有已安装的分发版'

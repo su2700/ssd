@@ -1,4 +1,6 @@
 import os
+import logging
+import queue
 import sys
 import threading
 import time
@@ -20,12 +22,15 @@ from core.disk_formatter import (
     sanitize_label
 )
 from core.wsl_mounter import WslMounter, load_saved_mounts
+from core.windows_compat import get_windows_support, get_wsl_capabilities, mount_support_error
 from core.explorer_helper import (
     open_in_explorer,
     map_drive_letter,
     unmap_drive_letter,
     create_desktop_shortcut
 )
+
+logger = logging.getLogger("ext4_mounter.gui")
 
 class Ext4MounterApp:
     def __init__(self, root: tk.Tk):
@@ -42,7 +47,12 @@ class Ext4MounterApp:
             pass
 
         self._init_theme_colors()
-        self.mounter = WslMounter()
+        self.mounter = WslMounter(discover=False)
+        self._ui_queue = queue.Queue()
+        self._closed = threading.Event()
+        self._wsl_ready = False
+        self._physical_ready = False
+        self._format_ready = False
 
         # State tracking
         self.disks_cache: List[Dict[str, Any]] = []
@@ -50,10 +60,84 @@ class Ext4MounterApp:
         self.is_busy = False
 
         self._build_ui()
+        self.root.report_callback_exception = self._report_callback_exception
+        self.root.protocol("WM_DELETE_WINDOW", self._close)
+        self.mount_phys_btn.configure(state=tk.DISABLED)
+        self.mount_img_btn.configure(state=tk.DISABLED)
+        self.format_phys_btn.configure(state=tk.DISABLED)
+        self._guard_timer = None
+        self._poll_timer = self.root.after(50, self._drain_ui_queue)
+        self._startup_timer = self.root.after_idle(self._initialize)
+
+    def _initialize(self):
+        self._startup_timer = None
         self._refresh_system_status()
         self._async_load_disks()
         self._refresh_active_mounts_table()
         self._start_permission_guard()
+
+    def _post_ui(self, callback):
+        # Workers must never call Tk, including Tk.after().
+        if not self._closed.is_set():
+            self._ui_queue.put(callback)
+
+    def _drain_ui_queue(self):
+        if self._closed.is_set():
+            return
+        for _ in range(100):
+            try:
+                callback = self._ui_queue.get_nowait()
+            except queue.Empty:
+                break
+            try:
+                callback()
+            except Exception:
+                self._report_callback_exception(*sys.exc_info())
+            if self._closed.is_set():
+                return
+        self._poll_timer = self.root.after(50, self._drain_ui_queue)
+
+    def _start_worker(self, target, action=False):
+        def guarded():
+            try:
+                target()
+            except Exception as error:
+                logger.exception("Background operation failed")
+                # Bind now: Python clears exception variables after except.
+                self._post_ui(lambda error=error: self._show_error(error, reset_action=action))
+        threading.Thread(target=guarded, daemon=True).start()
+
+    def _report_callback_exception(self, exc_type, error, traceback):
+        logger.error("UI callback failed", exc_info=(exc_type, error, traceback))
+        self._show_error(error)
+
+    def _show_error(self, error, reset_action=True):
+        if reset_action:
+            self._restore_action_controls()
+        self.log(str(error), level="ERROR")
+        messagebox.showerror("操作失败", f"操作未能完成，请检查 WSL、磁盘连接或管理员授权后重试。\n\n{error}", parent=self.root)
+
+    def _restore_action_controls(self):
+        self.is_busy = False
+        # Restore action controls after a failed worker, so retry remains possible.
+        for name, text in (
+            ("mount_phys_btn", "🚀 一键挂载物理 SSD 分区"),
+            ("mount_img_btn", "🚀 一键挂载 ext4 镜像文件"),
+            ("unmount_phys_btn", "⏏️ 卸载此物理磁盘"),
+            ("unmount_img_btn", "⏏️ 卸载此镜像"),
+            ("format_phys_btn", "🧹 格式化 SSD (ext4)"),
+        ):
+            enabled = {"mount_phys_btn": self._physical_ready,
+                       "mount_img_btn": self._wsl_ready,
+                       "format_phys_btn": self._format_ready}.get(name, True)
+            getattr(self, name).configure(text=text, state=tk.NORMAL if enabled else tk.DISABLED)
+
+    def _close(self):
+        self._closed.set()
+        for timer in (self._startup_timer, self._poll_timer, self._guard_timer):
+            if timer is not None:
+                self.root.after_cancel(timer)
+        self.root.destroy()
 
     def _init_theme_colors(self):
         self.bg_color = "#f4f6f9"
@@ -305,7 +389,7 @@ class Ext4MounterApp:
             bd=1,
             padx=6,
             cursor="hand2",
-            command=self._async_load_disks
+            command=self._refresh_discovery
         )
         self.refresh_disks_btn.pack(side=tk.LEFT)
 
@@ -492,7 +576,7 @@ class Ext4MounterApp:
         # Image Info Card
         self.img_info_card = tk.Label(
             parent,
-            text="提示: 支持 .img, .ext4, .vhdx, .vhd, .raw 等镜像文件。无需管理员权限即可秒级挂载！",
+            text="支持 .img/.ext4/.raw（无需 Windows 管理员权限）；.vhd/.vhdx 需要新版 WSL，并会请求 UAC 授权。",
             font=("Segoe UI", 9),
             fg="#0369a1",
             bg="#f0f9ff",
@@ -624,19 +708,66 @@ class Ext4MounterApp:
         line = f"[{timestamp}] [{level}] {message}\n"
         self.log_text.insert(tk.END, line)
         self.log_text.see(tk.END)
+        logger.log({"ERROR": logging.ERROR, "WARN": logging.WARNING}.get(level, logging.INFO), message)
 
     def _refresh_system_status(self):
+        self._wsl_ready = self._physical_ready = self._format_ready = False
+        for button in (self.mount_phys_btn, self.mount_img_btn, self.format_phys_btn):
+            button.configure(state=tk.DISABLED)
         admin_ok = is_admin()
         if admin_ok:
             self.admin_badge.configure(text="🛡️ 管理员权限 (已激活)", fg="#15803d", bg="#dcfce7")
         else:
             self.admin_badge.configure(text="🛡️ 普通权限 (物理挂载时将触发UAC)", fg="#b45309", bg="#fef3c7")
 
-        wsl_info = get_wsl_distros()
-        distro = wsl_info.get("default") or "未检测到"
-        self.wsl_badge.configure(text=f"WSL2: {distro} (就绪)", fg="#0369a1", bg="#e0f2fe")
-        self.mounter.set_distro(self.mounter.distro)
-        self.log(f"系统就绪: WSL 默认分发版为 [{self.mounter.distro}], 管理员权限: {admin_ok}")
+        def worker():
+            info = get_wsl_distros()
+            info["host"] = get_windows_support()
+            if info.get("distros") and info["host"]["supported"]:
+                info["capabilities"] = get_wsl_capabilities()
+            self._post_ui(lambda: self._on_system_status(info))
+        self._start_worker(worker)
+
+    def _on_system_status(self, info):
+        host = info.get("host", {})
+        if host:
+            self.log(f"{host['name']} (build {host.get('build', '?')})")
+        if host and not host["supported"]:
+            info["error"] = host["error"]
+        if info.get("error") or not info.get("distros"):
+            self.wsl_badge.configure(text="WSL: 不可用", fg="#b91c1c", bg="#fee2e2")
+            detail = info.get("error") or "未检测到 WSL 发行版。请安装并配置 WSL 2。"
+            self.log(detail, level="ERROR")
+            messagebox.showwarning("WSL 不可用", detail, parent=self.root)
+            return
+        distros = [d for d in info["distros"] if info.get("versions", {}).get(d) == 2]
+        if not distros:
+            self.wsl_badge.configure(text="WSL 2: 未配置", fg="#b91c1c", bg="#fee2e2")
+            detail = "需要 WSL 2 发行版。请运行 wsl --set-version <发行版> 2；wsl --set-default-version 2 不会转换现有发行版。"
+            self.log(detail, level="WARN")
+            messagebox.showwarning("需要 WSL 2", detail, parent=self.root)
+            return
+        distro = "Ubuntu" if "Ubuntu" in distros else (info.get("default") if info.get("default") in distros else distros[0])
+        self.mounter.set_distro(distro)
+        self._wsl_ready = True
+        self.wsl_badge.configure(text=f"WSL: {distro}", fg="#0369a1", bg="#e0f2fe")
+        capabilities = info.get("capabilities", {})
+        physical_error = mount_support_error(capabilities)
+        self._physical_ready = not physical_error
+        self._format_ready = not mount_support_error(capabilities, named=False)
+        self.mount_phys_btn.configure(state=tk.NORMAL if self._physical_ready else tk.DISABLED)
+        self.format_phys_btn.configure(state=tk.NORMAL if self._format_ready else tk.DISABLED)
+        self.mount_img_btn.configure(state=tk.NORMAL)
+        self.log(f"WSL 分发版: [{distro}]")
+        if physical_error:
+            self.log(physical_error, level="WARN")
+            messagebox.showwarning("请更新 WSL", physical_error, parent=self.root)
+
+    def _refresh_discovery(self):
+        if self.is_busy:
+            return
+        self._refresh_system_status()
+        self._async_load_disks()
 
     def _async_load_disks(self):
         self.disk_combo.set("正在扫描物理磁盘...")
@@ -646,15 +777,15 @@ class Ext4MounterApp:
 
         def worker():
             disks = get_physical_disks()
-            self.root.after(0, lambda: self._on_disks_loaded(disks))
+            self._post_ui(lambda: self._on_disks_loaded(disks))
 
-        threading.Thread(target=worker, daemon=True).start()
+        self._start_worker(worker)
 
     def _on_disks_loaded(self, disks: List[Dict[str, Any]]):
         self.disks_cache = disks
         if not disks:
             self.disk_combo.set("未检测到物理磁盘")
-            self.part_info_card.configure(text="未发现可用磁盘。请确认磁盘已连接并处于联机状态。")
+            self.part_info_card.configure(text="未发现可用磁盘。请检查磁盘连接、PowerShell 存储服务及访问权限；详情见日志。")
             self.log("未检测到物理磁盘", level="WARN")
             return
 
@@ -684,9 +815,9 @@ class Ext4MounterApp:
 
         def worker():
             parts = get_disk_partitions(disk_idx)
-            self.root.after(0, lambda: self._on_partitions_loaded(disk, parts))
+            self._post_ui(lambda: self._on_partitions_loaded(disk, parts))
 
-        threading.Thread(target=worker, daemon=True).start()
+        self._start_worker(worker)
 
     def _on_partitions_loaded(self, disk: Dict[str, Any], partitions: List[Dict[str, Any]]):
         self.current_partitions = partitions
@@ -773,7 +904,7 @@ class Ext4MounterApp:
 
         self.img_info_card.configure(
             text=f"📁 已就绪: {os.path.basename(path)} | 文件大小: {size_mb} MB\n"
-                 f"💡 即将挂载至: /mnt/wsl/img_{clean_name} (Windows: \\\\wsl.localhost\\...)",
+                 f"💡 即将挂载至: /mnt/wsl/img_{clean_name} (Windows: \\\\wsl$\\...)",
             fg="#15803d",
             bg="#dcfce7"
         )
@@ -806,9 +937,9 @@ class Ext4MounterApp:
                 read_only=read_only,
                 auto_chmod_777=auto_777
             )
-            self.root.after(0, lambda: self._on_physical_mount_finished(success, unc_path, msg, auto_open, read_only, auto_777))
+            self._post_ui(lambda: self._on_physical_mount_finished(success, unc_path, msg, auto_open, read_only, auto_777))
 
-        threading.Thread(target=worker, daemon=True).start()
+        self._start_worker(worker, action=True)
 
     def _on_physical_mount_finished(self, success: bool, unc_path: str, msg: str, auto_open: bool, read_only: bool, auto_777: bool):
         self.is_busy = False
@@ -841,9 +972,9 @@ class Ext4MounterApp:
 
         def worker():
             ok, msg = self.mounter.unmount_physical_disk(disk["index"], mount_name)
-            self.root.after(0, lambda: self._on_physical_unmount_finished(ok, msg))
+            self._post_ui(lambda: self._on_physical_unmount_finished(ok, msg))
 
-        threading.Thread(target=worker, daemon=True).start()
+        self._start_worker(worker, action=True)
 
     def _on_physical_unmount_finished(self, ok: bool, msg: str):
         self.is_busy = False
@@ -1109,9 +1240,9 @@ class Ext4MounterApp:
                 p_num = selected_part["partition_number"] if selected_part else 1
                 ok, msg = format_physical_partition(disk_idx, partition_number=p_num, label=label, distro=self.mounter.distro)
 
-            self.root.after(0, lambda: self._on_format_task_finished(ok, msg, disk_idx))
+            self._post_ui(lambda: self._on_format_task_finished(ok, msg, disk_idx))
 
-        threading.Thread(target=worker, daemon=True).start()
+        self._start_worker(worker, action=True)
 
     def _on_format_task_finished(self, ok: bool, msg: str, disk_idx: int):
         self.is_busy = False
@@ -1161,9 +1292,9 @@ class Ext4MounterApp:
                 read_only=read_only,
                 auto_chmod_777=auto_777
             )
-            self.root.after(0, lambda: self._on_image_mount_finished(success, unc_path, msg, auto_open, read_only, auto_777))
+            self._post_ui(lambda: self._on_image_mount_finished(success, unc_path, msg, auto_open, read_only, auto_777))
 
-        threading.Thread(target=worker, daemon=True).start()
+        self._start_worker(worker, action=True)
 
     def _on_image_mount_finished(self, success: bool, unc_path: str, msg: str, auto_open: bool, read_only: bool, auto_777: bool):
         self.is_busy = False
@@ -1193,9 +1324,9 @@ class Ext4MounterApp:
 
         def worker():
             ok, msg = self.mounter.unmount_image_file(mount_name, file_path)
-            self.root.after(0, lambda: self._on_image_unmount_finished(ok, msg))
+            self._post_ui(lambda: self._on_image_unmount_finished(ok, msg))
 
-        threading.Thread(target=worker, daemon=True).start()
+        self._start_worker(worker, action=True)
 
     def _on_image_unmount_finished(self, ok: bool, msg: str):
         self.is_busy = False
@@ -1209,11 +1340,16 @@ class Ext4MounterApp:
             messagebox.showwarning("卸载提示", msg)
 
     def _refresh_active_mounts_table(self):
+        def worker():
+            mounts = self.mounter.list_active_mounts()
+            self._post_ui(lambda: self._on_active_mounts_loaded(mounts))
+        self._start_worker(worker)
+
+    def _on_active_mounts_loaded(self, mounts):
         # Clear tree
         for item in self.mounts_tree.get_children():
             self.mounts_tree.delete(item)
 
-        mounts = self.mounter.list_active_mounts()
         for m in mounts:
             name = m.get("mount_name", "")
             m_type = "物理磁盘" if m.get("type") == "physical" else "镜像文件"
@@ -1276,9 +1412,9 @@ class Ext4MounterApp:
 
         def worker():
             ok, msg = self.mounter.fix_permissions(mount_name, mode="rw", restore_ro=False)
-            self.root.after(0, lambda: self._on_fix_permissions_finished(mount_name, ok, msg))
+            self._post_ui(lambda: self._on_fix_permissions_finished(mount_name, ok, msg))
 
-        threading.Thread(target=worker, daemon=True).start()
+        self._start_worker(worker, action=True)
 
     def _on_fix_permissions_finished(self, mount_name: str, ok: bool, msg: str):
         self.is_busy = False
@@ -1335,9 +1471,9 @@ class Ext4MounterApp:
 
         def worker():
             ok, msg = self.mounter.fix_rosbag_permissions(mount_name, target_dir=target_dir)
-            self.root.after(0, lambda: self._on_fix_rosbag_permissions_finished(mount_name, ok, msg))
+            self._post_ui(lambda: self._on_fix_rosbag_permissions_finished(mount_name, ok, msg))
 
-        threading.Thread(target=worker, daemon=True).start()
+        self._start_worker(worker, action=True)
 
     def _on_fix_rosbag_permissions_finished(self, mount_name: str, ok: bool, msg: str):
         self.is_busy = False
@@ -1359,19 +1495,21 @@ class Ext4MounterApp:
         self._permission_guard_tick()
 
     def _permission_guard_tick(self):
+        if self._closed.is_set():
+            return
         try:
             active = load_saved_mounts()
             rw_mounts = [m.get("mount_name") for m in active if not m.get("read_only") and m.get("mount_name")]
-            if rw_mounts and not self.is_busy:
+            if rw_mounts and self._wsl_ready and not self.is_busy:
                 def bg_sweep():
                     for name in rw_mounts:
                         if self.mounter.check_mount_exists(name):
                             self.mounter.sweep_permissions(name)
-                threading.Thread(target=bg_sweep, daemon=True).start()
+                self._start_worker(bg_sweep)
         except Exception:
-            pass
+            logger.exception("Permission guard failed")
         # Sweep every 45 seconds
-        self.root.after(45000, self._permission_guard_tick)
+        self._guard_timer = self.root.after(45000, self._permission_guard_tick)
 
     def _unmount_selected_mount(self):
         selected = self.mounts_tree.selection()
@@ -1415,12 +1553,13 @@ class Ext4MounterApp:
         python_exe = sys.executable
         # Try to use pythonw for windowed launch if available
         pythonw = os.path.join(os.path.dirname(python_exe), "pythonw.exe")
-        target = pythonw if os.path.exists(pythonw) else python_exe
+        frozen = getattr(sys, "frozen", False)
+        target = python_exe if frozen else (pythonw if os.path.exists(pythonw) else python_exe)
 
         ok, res = create_desktop_shortcut(
             target_path=target,
             shortcut_name="Ext4 一键挂载小工具",
-            arguments=f'"{script_path}"'
+            arguments="" if frozen else f'"{script_path}"'
         )
         if ok:
             self.log(f"快捷方式已成功创建至桌面: {res}", level="SUCCESS")
@@ -1431,9 +1570,19 @@ class Ext4MounterApp:
 
 
 def run_app():
+    if threading.current_thread() is not threading.main_thread():
+        raise RuntimeError("The Tk GUI must run on the main thread")
     root = tk.Tk()
-    app = Ext4MounterApp(root)
-    root.mainloop()
+    try:
+        app = Ext4MounterApp(root)
+        root.mainloop()
+    finally:
+        if 'app' in locals() and not app._closed.is_set():
+            app._close()
+        try:
+            root.destroy()
+        except tk.TclError:
+            pass
 
 if __name__ == "__main__":
     run_app()

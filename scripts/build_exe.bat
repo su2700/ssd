@@ -9,7 +9,7 @@ if errorlevel 1 (
     python -m pip install pyinstaller
     if errorlevel 1 goto failed
 )
-python -m PyInstaller --noconsole --onefile --clean --name "Ext4-Mounter" main.py
+python -m PyInstaller --noconsole --onefile --clean --manifest "scripts\app.manifest" --name "Ext4-Mounter" main.py
 if errorlevel 1 goto failed
 echo [OK] Build completed: dist\Ext4-Mounter.exe
 popd

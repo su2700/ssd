@@ -1,12 +1,14 @@
 import ctypes
 import json
+import logging
 import os
 import re
 import subprocess
 
 from typing import Dict, List, Optional, Any
 
-from .shell_utils import decode_output, run_powershell
+from .shell_utils import decode_output, run_powershell, native_system_executable
+logger = logging.getLogger("ext4_mounter.detector")
 
 LINUX_PARTITION_GUIDS = {
     "{0fc63daf-8483-4772-8e79-3d69d8477de4}",  # Linux filesystem data
@@ -34,16 +36,19 @@ def get_wsl_distros() -> Dict[str, Any]:
             "running": [...]
         }
     """
-    result = {"default": None, "distros": [], "running": []}
+    result = {"default": None, "distros": [], "running": [], "versions": {}}
     try:
         proc = subprocess.run(
-            ["wsl.exe", "-l", "-v"],
+            [native_system_executable("wsl.exe"), "-l", "-v"],
             capture_output=True,
             text=False,
             timeout=10
         )
         if proc.returncode != 0:
             result["error"] = decode_output(proc.stderr or proc.stdout, wsl_management=True).strip()
+            if not result["error"]:
+                result["error"] = f"WSL exited with code {proc.returncode}"
+            logger.warning("WSL discovery failed: %s", result["error"])
             return result
         output = decode_output(proc.stdout)
         # Ignore translated column headings and states; parse only the name and
@@ -54,10 +59,11 @@ def get_wsl_distros() -> Dict[str, Any]:
                 continue
             name = match.group(2).strip()
             result["distros"].append(name)
+            result["versions"][name] = int(match.group(3))
             if match.group(1):
                 result["default"] = name
         running = subprocess.run(
-            ["wsl.exe", "--list", "--running", "--quiet"],
+            [native_system_executable("wsl.exe"), "--list", "--running", "--quiet"],
             capture_output=True, timeout=10
         )
         if running.returncode == 0:
@@ -70,6 +76,7 @@ def get_wsl_distros() -> Dict[str, Any]:
             else:
                 result["default"] = result["distros"][0]
     except Exception as e:
+        logger.exception("WSL discovery failed")
         result["error"] = str(e)
     return result
 
@@ -125,12 +132,14 @@ def get_physical_disks() -> List[Dict[str, Any]]:
             disks = []
             for item in raw_data:
                 idx = item.get("Number")
-                size_bytes = item.get("Size") or 0
+                size_bytes = int(item.get("Size") or 0)
                 size_gb = round(size_bytes / (1024 ** 3), 2)
                 is_boot = bool(item.get("IsBoot"))
                 is_sys = bool(item.get("IsSystem"))
                 is_system = is_boot or is_sys or (idx == 0)
-                part_style = (item.get("PartitionStyle") or "RAW").upper()
+                style = item.get("PartitionStyle")
+                # Windows PowerShell 5.1 may serialize CIM enums as integers.
+                part_style = {0: "RAW", 1: "MBR", 2: "GPT"}.get(style, str(style or "RAW").upper())
                 bus_type = item.get("BusType") or "Fixed"
 
                 disks.append({
@@ -145,8 +154,9 @@ def get_physical_disks() -> List[Dict[str, Any]]:
                 })
             disks.sort(key=lambda d: d["index"])
             return disks
+        logger.warning("Get-Disk failed: %s", proc.stderr)
     except Exception:
-        pass
+        logger.exception("Get-Disk failed; trying CIM")
 
     # Fallback to Win32_DiskDrive
     ps_cmd_fallback = (
@@ -160,6 +170,7 @@ def get_physical_disks() -> List[Dict[str, Any]]:
             timeout=15
         )
         if proc.returncode != 0 or not proc.stdout.strip():
+            logger.warning("CIM disk query failed or returned no disks: %s", proc.stderr)
             return []
 
         raw_data = json.loads(proc.stdout)
@@ -169,7 +180,7 @@ def get_physical_disks() -> List[Dict[str, Any]]:
         disks = []
         for item in raw_data:
             idx = item.get("Index")
-            size_bytes = item.get("Size") or 0
+            size_bytes = int(item.get("Size") or 0)
             size_gb = round(size_bytes / (1024 ** 3), 2)
             disks.append({
                 "index": idx,
@@ -184,6 +195,7 @@ def get_physical_disks() -> List[Dict[str, Any]]:
         disks.sort(key=lambda d: d["index"])
         return disks
     except Exception:
+        logger.exception("CIM disk query failed")
         return []
 
 def get_disk_partitions(disk_index: int) -> List[Dict[str, Any]]:
@@ -236,6 +248,7 @@ def get_disk_partitions(disk_index: int) -> List[Dict[str, Any]]:
         partitions.sort(key=lambda x: x["partition_number"])
         return partitions
     except Exception:
+        logger.exception("Partition query failed for disk %s", disk_index)
         return []
 
 def get_free_drive_letters() -> List[str]:

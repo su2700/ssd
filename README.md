@@ -14,7 +14,7 @@
    - 自动处理 Windows UAC 管理员提权，告别繁琐的命令行操作。
 2. **ext4 镜像文件秒级挂载**
    - 支持 `.img`, `.ext4`, `.vhdx`, `.vhd`, `.raw` 等多种镜像格式。
-   - 通过 WSL2 loopback 高速桥接，**无需 Windows 管理员权限**即可秒级挂载与访问。
+   - `.img/.ext4/.raw` 通过 WSL2 loopback 挂载，无需 Windows 管理员权限；`.vhd/.vhdx` 使用新版 WSL 的原生挂载功能，需要 UAC 授权。
 3. **Windows 资源管理器原生集成**
    - 挂载后自动唤起 Windows File Explorer 窗口，直接像本地文件夹一样浏览、拖拽、拷贝文件。
 4. **数据安全防护 (Safe Mode)**
@@ -41,7 +41,8 @@
 ### 1. 系统与前置环境要求
 
 - **操作系统**：
-  - Windows 10（版本 2004 及以上 / 内部版本 19041+）或 Windows 11。
+  - Windows 10（版本 2004 及以上 / 内部版本 19041+，建议 22H2）或 Windows 11。
+  - 应用使用同一套源码和启动入口支持两种系统；启动后会检查实际 WSL 功能，而非仅根据系统名称判断。
 - **WSL 2（Windows 适用于 Linux 的子系统）**：
   - 本工具利用 Windows 官方 WSL 2 及其 Linux 原生内核驱动实现 ext4 分区与镜像文件的安全挂载。
   - **检查 WSL 状态**：打开 PowerShell 运行 `wsl --status` 或 `wsl -l -v`。
@@ -54,6 +55,11 @@
     ```powershell
     wsl --set-default-version 2
     ```
+  - 上述命令只设置新发行版的默认版本。使用 `wsl -l -v` 检查现有发行版，必要时运行 `wsl --set-version Ubuntu 2`（替换为实际名称）。应用只选择 WSL 2 发行版。
+  - **物理磁盘和 VHD 挂载**：Windows 10/11 均建议安装/更新 Microsoft Store 版 WSL。管理员 PowerShell 中运行 `wsl --update`，完成后点击界面“刷新磁盘”重新检测。物理磁盘自定义名称要求 `--mount`/`--name`；VHD 另需 `--vhd`。
+  - 旧版 WSL 缺少物理挂载功能时，应用仍可挂载 WSL 2 原始镜像，并会禁用不支持的磁盘操作。格式化会在修改分区前重新检查兼容性。
+  - 两种系统均使用 `\\wsl$\<发行版>\mnt\wsl\<挂载名>` 访问文件。磁盘查询兼容 Windows PowerShell 5.1；32 位 Python 会通过 Sysnative 调用系统工具。
+  - 依据：[Microsoft WSL 安装说明](https://learn.microsoft.com/windows/wsl/install)、[磁盘挂载要求与限制](https://learn.microsoft.com/windows/wsl/wsl2-mount-disk)。WSL 的 USB/读卡器及正在使用的系统磁盘限制仍适用。
 - **Python 3.8+**：
   - 前往 [Python 官网](https://www.python.org/downloads/) 下载并安装 Python 3.8 或更高版本。
   - ⚠️ **重要提示**：安装 Python 向导页面底部务必勾选 **“Add python.exe to PATH”**（将 Python 添加到环境变量）。
@@ -86,6 +92,7 @@ cd ssd
 1. 双击运行 `scripts\build_exe.bat`。
 2. 脚本会自动使用 PyInstaller 将应用打包为无黑框的单文件可执行程序。
 3. 打包产物将生成在 `dist\Ext4-Mounter.exe`，直接双击该 exe 即可运行。
+4. 构建脚本包含 Windows 10/11 兼容清单、DPI 和长路径声明。普通启动无需提权，仅磁盘操作请求 UAC。旧版 exe 需要重新构建才能包含兼容性修复。
 
 #### 步骤四（可选）：运行自测验证
 在项目根目录下的命令行中运行单元测试，验证所有磁盘探测与挂载模块正常工作：
@@ -93,6 +100,13 @@ cd ssd
 python -m unittest discover -s tests
 ```
 测试依赖本机 WSL 环境；无 WSL 的环境可运行 `python -m unittest discover -s tests -p test_shell_compat.py` 验证中英文终端兼容性。
+
+Windows 10/11 功能矩阵和启动回归无需真实 WSL 或磁盘操作（启动测试需要 Tcl/Tk）：
+```powershell
+python -m unittest discover -s tests -p test_windows_compat.py -v
+python -m unittest discover -s tests -p test_startup.py -v
+```
+这些测试模拟系统版本与 WSL 功能；发布前仍需在 Windows 10/11 真机或虚拟机上验证实际磁盘挂载。
 
 ---
 
@@ -183,6 +197,9 @@ python -m unittest discover -s tests
 - 项目和用户目录支持中文及空格；如果提示找不到 Python，请安装 Python 并添加到 PATH 后重试，无需为安装快捷方式额外提权。
 
 **Q1：双击桌面图标没有反应，或提示找不到 Python？**
+- 应用会将启动错误、后台异常和磁盘探测失败写入 `%LOCALAPPDATA%\Ext4-Mounter\app.log`（单文件最大 1 MiB，保留 3 个历史文件）。若该目录不可写，则使用 `%TEMP%\Ext4-Mounter\app.log`。
+- GUI 导入或 Tcl/Tk 初始化失败时会显示 Windows 原生错误对话框；WSL 不可用时窗口仍可打开，并显示依赖错误。物理磁盘操作仍在需要时请求 UAC 授权。
+- 启动回归测试不访问真实磁盘或 WSL：`python -m unittest discover -s tests -p test_startup.py -v`。测试会创建隐藏的 Tk 窗口，需要安装带 Tcl/Tk 的 Python。
 - 请确认已安装 Python 3.8+ 并添加到了系统环境变量（PATH）。
 - 在 PowerShell 中运行 `python --version`。如果未找到，可重新运行 Python 安装包，选择 **Modify** 并勾选 **"Add python.exe to PATH"**，随后重新运行 `install_desktop_shortcut.bat`。
 
@@ -198,7 +215,7 @@ python -m unittest discover -s tests
 - 本工具已内置自动提权模块，挂载时在 UAC 弹窗中点击“是”即可；或者也可以直接右键 `start_as_admin.bat` 选择“以管理员身份运行”。
 
 **Q4：挂载镜像文件 (.img / .vhdx) 是否需要管理员权限？**
-- **不需要**。镜像文件挂载利用了 WSL2 用户态 loopback 设备映射，普通用户权限即可直接挂载并在文件资源管理器中浏览与复制。
+- `.img/.ext4/.raw` 使用 WSL2 loopback，不需要 Windows 管理员权限；`.vhd/.vhdx` 使用 WSL 原生 VHD 挂载，需要支持 `--vhd` 的新版 WSL 和 UAC 管理员授权。
 
 **Q5：为什么挂载后，Windows 资源管理器显示 ROS2 / mcap 文件夹属性为「大小: 0 字节 / 0 个文件」或无法访问？**
 - 这是由于 Docker 容器或 ROS2 `ros2 bag record` 录包工具通常以 Linux `root` 用户运行并设置了严格的权限掩码（如 `0700` 或 `0750`）。
