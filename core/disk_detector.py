@@ -8,6 +8,7 @@ import subprocess
 from typing import Dict, List, Optional, Any
 
 from .shell_utils import decode_output, run_powershell, native_system_executable
+from .diagnostics import UserFacingError, explain_error
 logger = logging.getLogger("ext4_mounter.detector")
 
 LINUX_PARTITION_GUIDS = {
@@ -78,6 +79,7 @@ def get_wsl_distros() -> Dict[str, Any]:
     except Exception as e:
         logger.exception("WSL discovery failed")
         result["error"] = str(e)
+        result["diagnostic"] = explain_error(e, context="wsl")
     return result
 
 def is_system_disk(disk_index: int) -> bool:
@@ -108,7 +110,7 @@ def is_system_disk(disk_index: int) -> bool:
         return True
     return False
 
-def get_physical_disks() -> List[Dict[str, Any]]:
+def get_physical_disks(strict: bool = False) -> List[Dict[str, Any]]:
     """
     Query physical disks using PowerShell Get-Disk with Win32_DiskDrive fallback.
     Returns details including index, model, size, partition_style, is_system.
@@ -169,8 +171,9 @@ def get_physical_disks() -> List[Dict[str, Any]]:
             ps_cmd_fallback,
             timeout=15
         )
-        if proc.returncode != 0 or not proc.stdout.strip():
-            logger.warning("CIM disk query failed or returned no disks: %s", proc.stderr)
+        if proc.returncode != 0:
+            raise RuntimeError(proc.stderr.strip() or proc.stdout.strip() or f"CIM exit code {proc.returncode}")
+        if not proc.stdout.strip():
             return []
 
         raw_data = json.loads(proc.stdout)
@@ -194,8 +197,10 @@ def get_physical_disks() -> List[Dict[str, Any]]:
             })
         disks.sort(key=lambda d: d["index"])
         return disks
-    except Exception:
+    except Exception as error:
         logger.exception("CIM disk query failed")
+        if strict:
+            raise UserFacingError(explain_error(error, context="disk")) from error
         return []
 
 def get_disk_partitions(disk_index: int) -> List[Dict[str, Any]]:

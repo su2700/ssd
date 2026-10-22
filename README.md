@@ -199,6 +199,8 @@ python -m unittest discover -s tests
 **Q1：双击桌面图标没有反应，或提示找不到 Python？**
 - 应用会将启动错误、后台异常和磁盘探测失败写入 `%LOCALAPPDATA%\Ext4-Mounter\app.log`（单文件最大 1 MiB，保留 3 个历史文件）。若该目录不可写，则使用 `%TEMP%\Ext4-Mounter\app.log`。
 - GUI 导入或 Tcl/Tk 初始化失败时会显示 Windows 原生错误对话框；WSL 不可用时窗口仍可打开，并显示依赖错误。物理磁盘操作仍在需要时请求 UAC 授权。
+- 依赖/兼容性错误对话框会显示“问题、原因、解决方法、详细信息”和可用的日志路径，包括缺少 WSL、未安装发行版、WSL 1、新版 WSL 选项缺失、虚拟化未启用、权限/UAC、PowerShell/CIM 查询失败及 Linux 工具缺失。未知错误会明确说明原因尚未确定。
+- 缺少 Python/Tcl/Tk 或 Python 版本不兼容时，启动脚本也会显示原生提示。修复依赖后按提示重启系统，再点击“刷新磁盘”重新检测；程序不会自动安装组件或更改系统设置。
 - 启动回归测试不访问真实磁盘或 WSL：`python -m unittest discover -s tests -p test_startup.py -v`。测试会创建隐藏的 Tk 窗口，需要安装带 Tcl/Tk 的 Python。
 - 请确认已安装 Python 3.8+ 并添加到了系统环境变量（PATH）。
 - 在 PowerShell 中运行 `python --version`。如果未找到，可重新运行 Python 安装包，选择 **Modify** 并勾选 **"Add python.exe to PATH"**，随后重新运行 `install_desktop_shortcut.bat`。

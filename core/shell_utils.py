@@ -11,7 +11,8 @@ def native_system_executable(name: str) -> str:
     if os.name == "nt":
         windows = os.environ.get("SystemRoot", r"C:\Windows")
         for folder in ("Sysnative", "System32"):
-            path = os.path.join(windows, folder, name)
+            relative = os.path.join("WindowsPowerShell", "v1.0", name) if name.lower() == "powershell.exe" else name
+            path = os.path.join(windows, folder, relative)
             if os.path.isfile(path):
                 return path
     return name

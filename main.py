@@ -34,8 +34,8 @@ def configure_logging():
 
 
 def show_startup_error(error, log_path):
-    detail = f"程序启动失败 / Unable to start Ext4-Mounter:\n\n{error}"
-    detail += f"\n\n日志 / Log: {log_path}" if log_path else ""
+    from core.diagnostics import explain_error
+    detail = explain_error(error, context="startup", log_path=log_path)
     # A native dialog works even if importing tkinter or creating Tk failed.
     if os.name == "nt":
         ctypes.windll.user32.MessageBoxW(None, detail, "Ext4-Mounter", 0x10)

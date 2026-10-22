@@ -23,6 +23,7 @@ from core.disk_formatter import (
 )
 from core.wsl_mounter import WslMounter, load_saved_mounts
 from core.windows_compat import get_windows_support, get_wsl_capabilities, mount_support_error
+from core.diagnostics import explain_error, wsl_environment_error, log_location
 from core.explorer_helper import (
     open_in_explorer,
     map_drive_letter,
@@ -115,7 +116,13 @@ class Ext4MounterApp:
         if reset_action:
             self._restore_action_controls()
         self.log(str(error), level="ERROR")
-        messagebox.showerror("操作失败", f"操作未能完成，请检查 WSL、磁盘连接或管理员授权后重试。\n\n{error}", parent=self.root)
+        self._notify_failure("操作失败", error)
+
+    def _notify_failure(self, title, error, warning=False):
+        detail = explain_error(error, log_path=log_location())
+        self.log(detail, level="WARN" if warning else "ERROR")
+        dialog = messagebox.showwarning if warning else messagebox.showerror
+        dialog(title, detail, parent=self.root)
 
     def _restore_action_controls(self):
         self.is_busy = False
@@ -736,16 +743,13 @@ class Ext4MounterApp:
             info["error"] = host["error"]
         if info.get("error") or not info.get("distros"):
             self.wsl_badge.configure(text="WSL: 不可用", fg="#b91c1c", bg="#fee2e2")
-            detail = info.get("error") or "未检测到 WSL 发行版。请安装并配置 WSL 2。"
-            self.log(detail, level="ERROR")
-            messagebox.showwarning("WSL 不可用", detail, parent=self.root)
+            detail = wsl_environment_error(info)
+            self._notify_failure("WSL 不可用", detail, warning=True)
             return
         distros = [d for d in info["distros"] if info.get("versions", {}).get(d) == 2]
         if not distros:
             self.wsl_badge.configure(text="WSL 2: 未配置", fg="#b91c1c", bg="#fee2e2")
-            detail = "需要 WSL 2 发行版。请运行 wsl --set-version <发行版> 2；wsl --set-default-version 2 不会转换现有发行版。"
-            self.log(detail, level="WARN")
-            messagebox.showwarning("需要 WSL 2", detail, parent=self.root)
+            self._notify_failure("需要 WSL 2", wsl_environment_error(info), warning=True)
             return
         distro = "Ubuntu" if "Ubuntu" in distros else (info.get("default") if info.get("default") in distros else distros[0])
         self.mounter.set_distro(distro)
@@ -760,8 +764,7 @@ class Ext4MounterApp:
         self.mount_img_btn.configure(state=tk.NORMAL)
         self.log(f"WSL 分发版: [{distro}]")
         if physical_error:
-            self.log(physical_error, level="WARN")
-            messagebox.showwarning("请更新 WSL", physical_error, parent=self.root)
+            self._notify_failure("请更新 WSL", physical_error, warning=True)
 
     def _refresh_discovery(self):
         if self.is_busy:
@@ -776,10 +779,20 @@ class Ext4MounterApp:
         self.log("正在枚举物理磁盘与分区...")
 
         def worker():
-            disks = get_physical_disks()
+            try:
+                disks = get_physical_disks(strict=True)
+            except Exception as error:
+                logger.exception("Disk discovery failed")
+                self._post_ui(lambda error=error: self._on_disks_failed(error))
+                return
             self._post_ui(lambda: self._on_disks_loaded(disks))
 
         self._start_worker(worker)
+
+    def _on_disks_failed(self, error):
+        self._on_disks_loaded([])
+        self.disk_combo.set("磁盘查询失败（可修复后刷新）")
+        self._show_error(error, reset_action=False)
 
     def _on_disks_loaded(self, disks: List[Dict[str, Any]]):
         self.disks_cache = disks
@@ -955,7 +968,7 @@ class Ext4MounterApp:
             messagebox.showinfo("挂载成功", f"物理磁盘分区已成功挂载！\n\n访问路径:\n{unc_path}")
         else:
             self.log(f"挂载失败: {msg}", level="ERROR")
-            messagebox.showerror("挂载失败", f"挂载操作未成功完成。\n\n详情:\n{msg}")
+            self._notify_failure("挂载失败", msg)
 
     def _unmount_physical_disk_action(self):
         if self.is_busy:
@@ -985,7 +998,7 @@ class Ext4MounterApp:
             messagebox.showinfo("卸载完成", msg)
         else:
             self.log(f"卸载失败: {msg}", level="WARN")
-            messagebox.showwarning("卸载提示", msg)
+            self._notify_failure("卸载提示", msg, warning=True)
 
     def _format_ssd_dialog(self):
         if self.is_busy:
@@ -1263,10 +1276,7 @@ class Ext4MounterApp:
             )
         else:
             self.log(f"格式化未成功: {msg}", level="ERROR")
-            messagebox.showerror(
-                "格式化失败",
-                f"❌ 格式化未能成功完成。\n\n详情:\n{msg}"
-            )
+            self._notify_failure("格式化失败", msg)
 
     def _mount_image_file_action(self):
         if self.is_busy:
@@ -1310,7 +1320,7 @@ class Ext4MounterApp:
             messagebox.showinfo("挂载成功", f"ext4 镜像文件已成功挂载！\n\n访问路径:\n{unc_path}")
         else:
             self.log(f"镜像挂载失败: {msg}", level="ERROR")
-            messagebox.showerror("挂载失败", f"镜像文件挂载失败。\n\n详情:\n{msg}")
+            self._notify_failure("挂载失败", msg)
 
     def _unmount_image_file_action(self):
         if self.is_busy:
@@ -1337,7 +1347,7 @@ class Ext4MounterApp:
             messagebox.showinfo("卸载完成", msg)
         else:
             self.log(f"镜像卸载提示: {msg}", level="WARN")
-            messagebox.showwarning("卸载提示", msg)
+            self._notify_failure("卸载提示", msg, warning=True)
 
     def _refresh_active_mounts_table(self):
         def worker():
@@ -1424,7 +1434,7 @@ class Ext4MounterApp:
             messagebox.showinfo("配置成功", f"挂载点 [{mount_name}] 777 权限配置成功！\n\n全部现有文件/目录已开放 777 读写权限，且新建文件/文件夹将自动继承完全控制权限。")
         else:
             self.log(f"挂载点 [{mount_name}] 权限配置提示: {msg}", level="WARN")
-            messagebox.showwarning("配置提示", msg)
+            self._notify_failure("配置提示", msg, warning=True)
 
     def _fix_selected_rosbag_permissions(self):
         selected = self.mounts_tree.selection()
@@ -1488,7 +1498,7 @@ class Ext4MounterApp:
             )
         else:
             self.log(f"挂载点 [{mount_name}] mcap 权限修复未完成: {msg}", level="WARN")
-            messagebox.showwarning("修复提示", msg)
+            self._notify_failure("修复提示", msg, warning=True)
 
     def _start_permission_guard(self):
         """Start periodic light background sweep to ensure RW mounts always have 777 permissions."""
@@ -1566,7 +1576,7 @@ class Ext4MounterApp:
             messagebox.showinfo("成功", f"桌面快捷方式创建成功！\n\n路径: {res}")
         else:
             self.log(f"创建桌面快捷方式失败: {res}", level="ERROR")
-            messagebox.showerror("失败", f"创建快捷方式失败: {res}")
+            self._notify_failure("创建快捷方式失败", res)
 
 
 def run_app():

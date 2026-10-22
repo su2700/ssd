@@ -129,6 +129,20 @@ class TestGuiStartup(unittest.TestCase):
         self.assertTrue(self.root.winfo_exists())
         self.assertEqual(str(self.app.mount_phys_btn['state']), 'disabled')
         self.assertIn('WSL', self.app.wsl_badge['text'])
+        message = self.mocks[5].call_args.args[1]
+        self.assertIn('原因：', message)
+        self.assertIn('解决方法：', message)
+
+    def test_disk_failure_shows_recovery_message_and_allows_refresh(self):
+        with patch('gui.app.get_physical_disks', side_effect=PermissionError('CIM denied')), self.assertLogs('ext4_mounter'):
+            self.app._async_load_disks()
+            self.pump_until(lambda: self.mocks[4].called)
+        message = self.mocks[4].call_args.args[1]
+        self.assertIn('原因：', message)
+        self.assertIn('UAC', message)
+        self.assertIn('CIM denied', message)
+        self.assertIn('磁盘查询失败', self.app.disk_combo.get())
+        self.assertFalse(self.app.is_busy)
 
     def test_worker_exceptions_reach_ui_on_main_thread(self):
         # Start without running the normal discovery callbacks.
